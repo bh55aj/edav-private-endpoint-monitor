@@ -1,14 +1,21 @@
-# test#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-EDAV Private Endpoint Monitor  v2.0
+EDAV Private Endpoint Monitor v2.1
 =====================================
 Scans Azure disconnected private endpoints from a CSV/Excel input file,
 validates backend resources, checks Terraform ownership, and generates a
-professional colour-coded Excel report.  Optionally emails the report.
+professional colour-coded Excel report. Optionally emails the report.
 Deletion is approval-gated: nothing is removed unless --delete-approved
-flag is used AND the row has ApprovedToDelete=Yes.
+flag is used AND the row has an approval column set to an approved value.
 
 Safe by default - Read / Report only.
+
+v2.1 Changes:
+- Flexible approval column detection (ApprovedToDelete, Approved To Delete,
+  approved_to_delete, approved, delete approved, DeleteApproved, etc.)
+- Flexible approval value detection (Yes, YES, yes, Y, y, True, true, 1, Approved, approved)
+- Debug logging when --delete-approved is passed
+- Fail-safe with clear message when no approved rows are found
 """
 
 import argparse
@@ -31,7 +38,7 @@ try:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 except ImportError:
-    print("ERROR: Missing dependencies.  Run:  pip install -r requirements.txt")
+    print("ERROR: Missing dependencies. Run: pip install -r requirements.txt")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -39,7 +46,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s %(levelname)-8s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("edav-monitor")
@@ -48,21 +55,21 @@ log = logging.getLogger("edav-monitor")
 # Style constants
 # ---------------------------------------------------------------------------
 CLR = {
-    "hdr_bg":  "1F4E79", "hdr_fg":  "FFFFFF",
+    "hdr_bg": "1F4E79", "hdr_fg": "FFFFFF",
     "safe_bg": "C6EFCE", "safe_fg": "276221",
-    "rev_bg":  "FFEB9C", "rev_fg":  "9C6500",
-    "del_bg":  "FFC7CE", "del_fg":  "9C0006",
-    "na_bg":   "D9D9D9", "na_fg":   "595959",
+    "rev_bg": "FFEB9C", "rev_fg": "9C6500",
+    "del_bg": "FFC7CE", "del_fg": "9C0006",
+    "na_bg": "D9D9D9", "na_fg": "595959",
 }
 
 ACTION_STYLE = {
-    "Safe Delete Candidate":                          ("safe_bg", "safe_fg"),
-    "Do Not Delete - Terraform Managed":              ("del_bg",  "del_fg"),
-    "Investigate - Backend Exists":                   ("rev_bg",  "rev_fg"),
-    "Review - Not Disconnected":                      ("rev_bg",  "rev_fg"),
-    "Review":                                         ("rev_bg",  "rev_fg"),
+    "Safe Delete Candidate": ("safe_bg", "safe_fg"),
+    "Do Not Delete - Terraform Managed": ("del_bg", "del_fg"),
+    "Investigate - Backend Exists": ("rev_bg", "rev_fg"),
+    "Review - Not Disconnected": ("rev_bg", "rev_fg"),
+    "Review": ("rev_bg", "rev_fg"),
     "Endpoint Not Found / Check Subscription or Access": ("na_bg", "na_fg"),
-    "Skipped - Empty Name":                           ("na_bg",  "na_fg"),
+    "Skipped - Empty Name": ("na_bg", "na_fg"),
 }
 
 HEADERS = [
@@ -77,6 +84,45 @@ COL_ALIASES = {
     "resource group": "Resource Group", "resourcegroup": "Resource Group",
     "rg": "Resource Group",
 }
+
+# ---------------------------------------------------------------------------
+# Approval normalisation helpers
+# ---------------------------------------------------------------------------
+
+def normalize_key(value):
+    """Normalise a column header for flexible matching."""
+    return str(value).replace("\ufeff", "").strip().lower().replace(" ", "").replace("_", "")
+
+
+def normalize_value(value):
+    """Normalise an approval cell value for flexible matching."""
+    return str(value).replace("\ufeff", "").strip().lower()
+
+
+def is_approved(value):
+    """Return True if the normalised value represents an approval."""
+    return normalize_value(value) in {"yes", "y", "true", "1", "approved"}
+
+
+def get_approval_value(row):
+    """
+    Search a CSV row for an approval column using flexible key matching.
+
+    Accepted column names (after normalisation):
+        approvedtodelete, approved, deleteapproved, approveddelete, deleteapproval
+    """
+    approval_keys = [
+        "approvedtodelete",
+        "approved",
+        "deleteapproved",
+        "approveddelete",
+        "deleteapproval",
+    ]
+    normalized_row = {normalize_key(k): v for k, v in row.items()}
+    for key in approval_keys:
+        if key in normalized_row:
+            return normalized_row[key]
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -208,18 +254,22 @@ def load_endpoints(path):
 
 def scan(ep, subscriptions, tf_state, tf_code):
     name = str(ep.get("Endpoint Name", "")).strip()
-    rg   = str(ep.get("Resource Group", "")).strip()
-    rec  = {
-        "Endpoint Name":     name,
-        "Resource Group":    rg,
-        "Subscription":      "",
-        "Connection State":  "Not Found",
-        "Backend Resource":  "",
-        "Backend Exists":    "Unknown",
+    rg = str(ep.get("Resource Group", "")).strip()
+
+    # Preserve the raw approval value from whatever column it came from
+    raw_approval = get_approval_value(ep)
+
+    rec = {
+        "Endpoint Name": name,
+        "Resource Group": rg,
+        "Subscription": "",
+        "Connection State": "Not Found",
+        "Backend Resource": "",
+        "Backend Exists": "Unknown",
         "Terraform Managed": "Unknown",
-        "Recommended Action":"",
-        "Notes":             "",
-        "ApprovedToDelete":  str(ep.get("ApprovedToDelete", "")).strip(),
+        "Recommended Action": "",
+        "Notes": "",
+        "ApprovedToDelete": raw_approval,
     }
     if not name:
         rec["Recommended Action"] = "Skipped - Empty Name"
@@ -389,7 +439,7 @@ def build_email_html(results, run_date):
         f"Safe Delete Candidates ready for decommission: {safe}</p>"
         "<p>Full validation report is attached. "
         "<em>No endpoints have been deleted by this run.</em></p>"
-        "<p style='color:#888;font-size:11px'>EDAV Private Endpoint Monitor v2.0</p>"
+        "<p style='color:#888;font-size:11px'>EDAV Private Endpoint Monitor v2.1</p>"
         "</body></html>"
     )
 
@@ -400,8 +450,8 @@ def send_email(cfg, subject, body, attachments):
         log.warning("Incomplete email config - skipping.")
         return
     msg = MIMEMultipart("mixed")
-    msg["From"]    = cfg["from_email"]
-    msg["To"]      = cfg["to_email"]
+    msg["From"] = cfg["from_email"]
+    msg["To"] = cfg["to_email"]
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "html"))
     for fp in attachments:
@@ -447,23 +497,23 @@ def delete_endpoint(name, rg, sub):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="EDAV Private Endpoint Monitor v2.0 -- Scan, Validate, Report")
-    p.add_argument("--input",           required=True,
+        description="EDAV Private Endpoint Monitor v2.1 -- Scan, Validate, Report")
+    p.add_argument("--input", required=True,
                    help="Path to CSV or Excel input file")
-    p.add_argument("--subscriptions",   default="",
+    p.add_argument("--subscriptions", default="",
                    help="Comma-separated Azure subscription names")
-    p.add_argument("--terraform-path",  default="",
+    p.add_argument("--terraform-path", default="",
                    help="Path to local Terraform repo (optional)")
-    p.add_argument("--output-dir",      default="reports",
+    p.add_argument("--output-dir", default="reports",
                    help="Output directory for reports (default: reports/)")
     p.add_argument("--delete-approved", action="store_true", default=False,
-                   help="Delete rows with ApprovedToDelete=Yes. USE ONLY AFTER CHANGE TICKET APPROVAL.")
-    p.add_argument("--email-to",    default="", help="Recipient email(s), comma-separated")
-    p.add_argument("--email-from",  default="", help="Sender email address")
+                   help="Delete rows approved for deletion. USE ONLY AFTER CHANGE TICKET APPROVAL.")
+    p.add_argument("--email-to", default="", help="Recipient email(s), comma-separated")
+    p.add_argument("--email-from", default="", help="Sender email address")
     p.add_argument("--smtp-server", default="", help="SMTP server hostname")
-    p.add_argument("--smtp-port",   default="587", help="SMTP port (default 587)")
-    p.add_argument("--smtp-user",   default="", help="SMTP username (if auth required)")
-    p.add_argument("--smtp-pass",   default="", help="SMTP password (if auth required)")
+    p.add_argument("--smtp-port", default="587", help="SMTP port (default 587)")
+    p.add_argument("--smtp-user", default="", help="SMTP username (if auth required)")
+    p.add_argument("--smtp-pass", default="", help="SMTP password (if auth required)")
     return p.parse_args()
 
 
@@ -472,10 +522,10 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 def main():
-    args   = parse_args()
+    args = parse_args()
     run_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log.info("=" * 60)
-    log.info("EDAV Private Endpoint Monitor  v2.0")
+    log.info("EDAV Private Endpoint Monitor v2.1")
     log.info("Run: %s", run_dt)
     log.info("=" * 60)
 
@@ -483,9 +533,9 @@ def main():
     if not subs:
         log.info("No subscriptions specified - auto-detecting...")
         subs = get_subscriptions()
-    if not subs:
-        log.error("No subscriptions found. Run: az login --use-device-code")
-        sys.exit(1)
+        if not subs:
+            log.error("No subscriptions found. Run: az login --use-device-code")
+            sys.exit(1)
     log.info("Subscriptions: %s", subs)
 
     tf_state, tf_code = load_terraform(args.terraform_path)
@@ -497,7 +547,7 @@ def main():
     log.info("Loaded %d endpoints", len(endpoints))
 
     os.makedirs(args.output_dir, exist_ok=True)
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     xlsx_out = os.path.join(args.output_dir, f"EDAV_Validation_Report_{ts}.xlsx")
     csv_out  = os.path.join(args.output_dir, f"EDAV_Validation_Report_{ts}.csv")
     md_out   = os.path.join(args.output_dir, f"summary_{ts}.md")
@@ -511,7 +561,7 @@ def main():
     # Save outputs
     df_out = pd.DataFrame(results, columns=HEADERS + ["ApprovedToDelete"])
     df_out.to_csv(csv_out, index=False)
-    log.info("CSV  : %s", csv_out)
+    log.info("CSV : %s", csv_out)
     build_excel(results, xlsx_out, run_dt)
     log.info("Excel: %s", xlsx_out)
 
@@ -522,7 +572,7 @@ def main():
 
     log.info("")
     log.info("=" * 60)
-    log.info("SUMMARY  (Total: %d)", len(results))
+    log.info("SUMMARY (Total: %d)", len(results))
     log.info("=" * 60)
     for a, c in sorted(counts.items(), key=lambda x: x[1], reverse=True):
         log.info("  %-50s %d", a, c)
@@ -530,33 +580,83 @@ def main():
 
     with open(md_out, "w") as f:
         f.write("# EDAV Private Endpoint Validation Summary\n\n")
-        f.write(f"**Run Date:** {run_dt}  |  **Total:** {len(results)}\n\n")
+        f.write(f"**Run Date:** {run_dt} | **Total:** {len(results)}\n\n")
         f.write("| Action | Count |\n|---|---|\n")
         for a, c in sorted(counts.items(), key=lambda x: x[1], reverse=True):
             f.write(f"| {a} | {c} |\n")
         f.write(f"\n**Reports saved to:** {args.output_dir}\n")
-    log.info("MD   : %s", md_out)
+    log.info("MD  : %s", md_out)
 
+    # ------------------------------------------------------------------
     # Deletion (approval-gated)
+    # ------------------------------------------------------------------
     if args.delete_approved:
-        approved = [r for r in results
-                    if r.get("Recommended Action") == "Safe Delete Candidate"
-                    and r.get("ApprovedToDelete", "").strip().lower() == "yes"]
-        if not approved:
-            log.info("No rows marked ApprovedToDelete=Yes. Nothing deleted.")
+        # --- Debug: show what approval values were detected ---
+        all_approval_values = [get_approval_value(r) for r in results]
+        approved_rows = [r for r in results
+                         if r.get("Recommended Action") == "Safe Delete Candidate"
+                         and is_approved(get_approval_value(r))]
+        skipped_rows  = [r for r in results
+                         if r.get("Recommended Action") == "Safe Delete Candidate"
+                         and not is_approved(get_approval_value(r))]
+
+        # Detect which approval column name was actually found in the CSV
+        detected_col = "not detected"
+        if endpoints:
+            sample_row = endpoints[0]
+            approval_keys_norm = [
+                "approvedtodelete", "approved", "deleteapproved",
+                "approveddelete", "deleteapproval",
+            ]
+            norm_sample = {normalize_key(k): k for k in sample_row.keys()}
+            for ak in approval_keys_norm:
+                if ak in norm_sample:
+                    detected_col = norm_sample[ak]
+                    break
+
+        log.info("")
+        log.info("=" * 60)
+        log.info("DELETE MODE - Approval Debug")
+        log.info("=" * 60)
+        log.info("  Detected approval column : %s", detected_col)
+        log.info("  Total approved rows      : %d", len(approved_rows))
+        log.info("  Total skipped rows       : %d", len(skipped_rows))
+        log.info("  First 5 approval values  : %s",
+                 [str(v) for v in all_approval_values[:5]])
+        log.info("=" * 60)
+
+        if not approved_rows:
+            log.error("")
+            log.error("No approved rows found. Check approval column/value formatting.")
+            log.error("")
+            log.error("CSV columns found in input:")
+            if endpoints:
+                for col in endpoints[0].keys():
+                    log.error("  -> %r  (normalised: %r)", col, normalize_key(col))
+            log.error("")
+            log.error("First 5 approval-related values detected:")
+            for val in all_approval_values[:5]:
+                log.error("  raw=%r  normalised=%r  is_approved=%s",
+                          val, normalize_value(val), is_approved(val))
+            log.error("")
+            log.error("Accepted approval values: yes, y, true, 1, approved")
+            log.error("Accepted column names   : ApprovedToDelete, Approved To Delete,")
+            log.error("                          approved_to_delete, approved,")
+            log.error("                          delete approved, DeleteApproved")
+            sys.exit(1)
+
+        log.warning(">>> DELETION MODE: %d endpoint(s) queued.", len(approved_rows))
+        confirm = input(f"\nType CONFIRM to delete {len(approved_rows)} endpoint(s): ")
+        if confirm.strip() != "CONFIRM":
+            log.info("Deletion cancelled.")
         else:
-            log.warning(">>> DELETION MODE: %d endpoint(s) queued.", len(approved))
-            confirm = input(f"\nType CONFIRM to delete {len(approved)} endpoint(s): ")
-            if confirm.strip() != "CONFIRM":
-                log.info("Deletion cancelled.")
-            else:
-                for rec in approved:
-                    nm  = rec["Endpoint Name"]
-                    rg  = rec["Resource Group"]
-                    sub = rec["Subscription"]
-                    log.info("Deleting %s ...", nm)
-                    ok = delete_endpoint(nm, rg, sub)
-                    log.info("  -> %s", "SUCCESS" if ok else "FAILED")
+            for rec in approved_rows:
+                nm  = rec["Endpoint Name"]
+                rg  = rec["Resource Group"]
+                sub = rec["Subscription"]
+                log.info("Deleting %s ...", nm)
+                ok = delete_endpoint(nm, rg, sub)
+                log.info("  -> %s", "SUCCESS" if ok else "FAILED")
     else:
         safe_n = counts.get("Safe Delete Candidate", 0)
         if safe_n:
@@ -569,8 +669,8 @@ def main():
     if args.email_to and args.smtp_server:
         cfg = dict(
             smtp_server=args.smtp_server, smtp_port=args.smtp_port,
-            from_email=args.email_from,   to_email=args.email_to,
-            smtp_user=args.smtp_user,     smtp_pass=args.smtp_pass,
+            from_email=args.email_from, to_email=args.email_to,
+            smtp_user=args.smtp_user, smtp_pass=args.smtp_pass,
             use_tls=True,
         )
         subj = (f"EDAV Endpoint Cleanup | {run_dt} | "
