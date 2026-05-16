@@ -157,6 +157,46 @@ COL_ALIASES = {
     "rg":             "Resource Group",
 }
 
+# ---------------------------------------------------------------------------
+# Approval normalisation helpers
+# ---------------------------------------------------------------------------
+
+def normalize_key(value: str) -> str:
+    """Normalise a column header for flexible matching."""
+    return str(value).replace("\ufeff", "").strip().lower().replace(" ", "").replace("_", "")
+
+
+def normalize_value(value: str) -> str:
+    """Normalise an approval cell value for flexible matching."""
+    return str(value).replace("\ufeff", "").strip().lower()
+
+
+def is_approved(value: str) -> bool:
+    """Return True if the normalised value represents an approval."""
+    return normalize_value(value) in {"yes", "y", "true", "1", "approved"}
+
+
+def get_approval_value(row: dict) -> str:
+    """
+    Search a CSV row for an approval column using flexible key matching.
+
+    Accepted column names (after normalisation):
+        approvedtodelete, approved, deleteapproved, approveddelete, deleteapproval
+    """
+    approval_keys = [
+        "approvedtodelete",
+        "approved",
+        "deleteapproved",
+        "approveddelete",
+        "deleteapproval",
+    ]
+    normalized_row = {normalize_key(k): v for k, v in row.items()}
+    for key in approval_keys:
+        if key in normalized_row:
+            return normalized_row[key]
+    return ""
+
+
 # Substrings in Recommended Action that hard-block deletion
 _BLOCK_SUBSTRINGS = ("Do Not Delete", "Endpoint Not Found", "Terraform Managed", "Excluded")
 
@@ -441,7 +481,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
         "Terraform Managed":  "Unknown",
         "Recommended Action": "",
         "Notes":              "",
-        "ApprovedToDelete":   str(ep.get("ApprovedToDelete", "")).strip(),
+        "ApprovedToDelete":   get_approval_value(ep),
     }
     if not name:
         rec["Recommended Action"] = "Skipped - Empty Name"
@@ -844,15 +884,15 @@ def _is_deletion_blocked(rec: dict, exclusions: set) -> tuple:
     """
     name     = str(rec.get("Endpoint Name", "")).strip()
     rg       = str(rec.get("Resource Group", "")).strip()
-    approved = str(rec.get("ApprovedToDelete", "")).strip().lower()
+    approved = normalize_value(get_approval_value(rec))
     action   = str(rec.get("Recommended Action", "")).strip()
 
     if not name:
         return True, "Endpoint Name is blank"
     if not rg:
         return True, "Resource Group is blank"
-    if approved != "yes":
-        return True, f"ApprovedToDelete='{rec.get('ApprovedToDelete','')}' — must be 'Yes'"
+    if not is_approved(approved):
+        return True, f"ApprovedToDelete='{rec.get('ApprovedToDelete','')}' — must be Yes/yes/Y/true/1/approved"
     if name.lower() in exclusions:
         return True, "Listed in exclusions.txt"
     for substr in _BLOCK_SUBSTRINGS:
@@ -920,6 +960,60 @@ def run_delete_approved(
     del_log = []
 
     # ------------------------------------------------------------------
+    # Debug: approval column detection
+    # ------------------------------------------------------------------
+    all_approval_values = [get_approval_value(r) for r in results]
+    total_approved_count = sum(1 for r in results if is_approved(get_approval_value(r)))
+    total_skipped_count  = sum(1 for r in results
+                               if r.get("Recommended Action") == "Safe Delete Candidate"
+                               and not is_approved(get_approval_value(r)))
+
+    # Detect which column name was found in the data
+    detected_col = "not detected"
+    if results:
+        approval_keys_norm = [
+            "approvedtodelete", "approved", "deleteapproved",
+            "approveddelete", "deleteapproval",
+        ]
+        norm_sample = {normalize_key(k): k for k in results[0].keys()}
+        for ak in approval_keys_norm:
+            if ak in norm_sample:
+                detected_col = norm_sample[ak]
+                break
+
+    log.info("")
+    log.info("=" * 70)
+    log.info("DELETE MODE — Approval Debug")
+    log.info("=" * 70)
+    log.info("  Detected approval column : %s", detected_col)
+    log.info("  Total approved rows      : %d", total_approved_count)
+    log.info("  Total skipped rows       : %d", total_skipped_count)
+    log.info("  First 5 approval values  : %s",
+             [str(v) for v in all_approval_values[:5]])
+    log.info("=" * 70)
+
+    if total_approved_count == 0:
+        log.error("")
+        log.error("No approved rows found. Check approval column/value formatting.")
+        log.error("")
+        log.error("CSV columns found in input:")
+        if results:
+            for col in results[0].keys():
+                log.error("  -> %r  (normalised: %r)", col, normalize_key(col))
+        log.error("")
+        log.error("First 5 approval-related values detected:")
+        for val in all_approval_values[:5]:
+            log.error("  raw=%r  normalised=%r  is_approved=%s",
+                      val, normalize_value(val), is_approved(val))
+        log.error("")
+        log.error("Accepted approval values: yes, y, true, 1, approved")
+        log.error("Accepted column names   : ApprovedToDelete, Approved To Delete,")
+        log.error("                          approved_to_delete, approved,")
+        log.error("                          delete approved, DeleteApproved")
+        import sys as _sys
+        _sys.exit(1)
+
+    # ------------------------------------------------------------------
     # Pass 1 — screening
     # ------------------------------------------------------------------
     candidates = []
@@ -940,7 +1034,7 @@ def run_delete_approved(
                 "Error Message":     reason,
             }
             del_log.append(entry)
-            if str(rec.get("ApprovedToDelete", "")).strip().lower() == "yes":
+            if is_approved(get_approval_value(rec)):
                 log.warning("  BLOCKED [%s]: %s  — %s",
                             result_label, rec.get("Endpoint Name", "(empty)"), reason)
         else:
