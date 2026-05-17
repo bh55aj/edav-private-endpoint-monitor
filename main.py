@@ -469,6 +469,7 @@ def load_endpoints(path: str) -> list:
 
 def scan(ep: dict, subscriptions: list, tf_state: str,
          tf_code: str, exclusions: set) -> dict:
+    original_row = dict(ep)
     name = str(ep.get("Endpoint Name", "")).strip()
     rg   = str(ep.get("Resource Group", "")).strip()
     rec  = {
@@ -481,10 +482,10 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
         "Terraform Managed":  "Unknown",
         "Recommended Action": "",
         "Notes":              "",
-        "ApprovedToDelete":   get_approval_value(ep),
     }
     if not name:
         rec["Recommended Action"] = "Skipped - Empty Name"
+        rec.update(original_row)
         return rec
 
     # Exclusion list check
@@ -492,6 +493,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
         rec["Recommended Action"] = "Excluded"
         rec["Notes"] = "Listed in exclusions.txt — will never be deleted."
         log.info("  [EXCLUDED] %s", name)
+        rec.update(original_row)
         return rec
 
     for sub in subscriptions:
@@ -522,6 +524,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
         rec["Connection State"]   = "Endpoint Not Found"
         rec["Notes"]              = "Not found in any scanned subscription."
         rec["Recommended Action"] = "Endpoint Not Found / Check Subscription or Access"
+        rec.update(original_row)
         return rec
 
     rec["Terraform Managed"] = in_terraform(name, tf_state, tf_code)
@@ -530,6 +533,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
                            rec["Terraform Managed"])
     rec["Recommended Action"] = action
     rec["Notes"]              = notes
+    rec.update(original_row)
     return rec
 
 # ===========================================================================
@@ -960,13 +964,30 @@ def run_delete_approved(
     del_log = []
 
     # ------------------------------------------------------------------
-    # Debug: approval column detection
+    # RAW APPROVAL DEBUG
     # ------------------------------------------------------------------
-    all_approval_values = [get_approval_value(r) for r in results]
-    total_approved_count = sum(1 for r in results if is_approved(get_approval_value(r)))
-    total_skipped_count  = sum(1 for r in results
-                               if r.get("Recommended Action") == "Safe Delete Candidate"
-                               and not is_approved(get_approval_value(r)))
+    log.info("=" * 70)
+    log.info("RAW APPROVAL DEBUG")
+    log.info("=" * 70)
+    for idx, r in enumerate(results[:10]):
+        log.info(
+            "ROW %s | approval raw=%r | normalized=%r | approved=%s",
+            idx + 1,
+            get_approval_value(r),
+            normalize_value(get_approval_value(r)),
+            is_approved(get_approval_value(r))
+        )
+    log.info("=" * 70)
+
+    # ------------------------------------------------------------------
+    # Build approved_rows list
+    # ------------------------------------------------------------------
+    approved_rows = []
+    for r in results:
+        approval_value = get_approval_value(r)
+        if is_approved(approval_value):
+            approved_rows.append(r)
+    total_approved_count = len(approved_rows)
 
     # Detect which column name was found in the data
     detected_col = "not detected"
@@ -987,37 +1008,21 @@ def run_delete_approved(
     log.info("=" * 70)
     log.info("  Detected approval column : %s", detected_col)
     log.info("  Total approved rows      : %d", total_approved_count)
-    log.info("  Total skipped rows       : %d", total_skipped_count)
-    log.info("  First 5 approval values  : %s",
-             [str(v) for v in all_approval_values[:5]])
+    if approved_rows:
+        log.info("First approved endpoint examples:")
+        for x in approved_rows[:5]:
+            log.info(
+                "  -> %s | approval=%r",
+                x.get("Endpoint Name", ""),
+                get_approval_value(x)
+            )
     log.info("=" * 70)
-
-    if total_approved_count == 0:
-        log.error("")
-        log.error("No approved rows found. Check approval column/value formatting.")
-        log.error("")
-        log.error("CSV columns found in input:")
-        if results:
-            for col in results[0].keys():
-                log.error("  -> %r  (normalised: %r)", col, normalize_key(col))
-        log.error("")
-        log.error("First 5 approval-related values detected:")
-        for val in all_approval_values[:5]:
-            log.error("  raw=%r  normalised=%r  is_approved=%s",
-                      val, normalize_value(val), is_approved(val))
-        log.error("")
-        log.error("Accepted approval values: yes, y, true, 1, approved")
-        log.error("Accepted column names   : ApprovedToDelete, Approved To Delete,")
-        log.error("                          approved_to_delete, approved,")
-        log.error("                          delete approved, DeleteApproved")
-        import sys as _sys
-        _sys.exit(1)
 
     # ------------------------------------------------------------------
     # Pass 1 — screening
     # ------------------------------------------------------------------
     candidates = []
-    for rec in results:
+    for rec in approved_rows:
         blocked, reason = _is_deletion_blocked(rec, exclusions)
         if blocked:
             result_label = "Excluded" if "exclusions.txt" in reason else "Skipped"
