@@ -787,7 +787,7 @@ def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date:
         f.write("| # | Endpoint Name | Resource Group | Subscription |\n")
         f.write("|---|---|---|---|\n")
         for i, r in enumerate(deleted, 1):
-            f.write(f"| {i} | {r[\"Endpoint Name\"]} | {r[\"Resource Group\"]} | {r[\"Subscription\"]} |\n")
+            f.write(f"| {i} | {r['Endpoint Name']} | {r['Resource Group']} | {r['Subscription']} |\n")
         f.write("\n## How to Restore an Endpoint\n\n")
         f.write("### Step 1 — Locate the backup JSON\n")
         f.write(f"Backups are saved in: {os.path.abspath(os.path.join(backup_dir, 'private_endpoints'))}\n\n")
