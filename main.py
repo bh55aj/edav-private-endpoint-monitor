@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EDAV Private Endpoint Monitor  v3.0
+EDAV Private Endpoint Monitor v3.0
 =====================================
 Enterprise-grade Azure governance and cleanup platform for EDAV disconnected
 private endpoints.
@@ -31,7 +31,7 @@ Deletion (approval-gated, three-layer safety)
 * Structured log written to logs/ directory for every run
 * Delete report (XLSX/CSV/MD) written after every delete run
 * The ONLY Azure delete command ever issued is:
-      az network private-endpoint delete
+    az network private-endpoint delete
   No backend resources (Key Vault, Storage, SQL, VNet, NIC, DNS, NSG, etc.)
   are ever touched.
 
@@ -88,9 +88,9 @@ def _resolve_az():
 AZ_CMD = _resolve_az()
 
 # ===========================================================================
-# Logging  —  dual output: console + rolling log file
+# Logging — dual output: console + rolling log file
 # ===========================================================================
-_LOG_FMT = "%(asctime)s  %(levelname)-8s  [%(threadName)s]  %(message)s"
+_LOG_FMT = "%(asctime)s %(levelname)-8s [%(threadName)s] %(message)s"
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 def setup_logging(log_dir: str, ts: str) -> logging.Logger:
@@ -118,13 +118,13 @@ log = logging.getLogger("edav")
 # Style constants
 # ===========================================================================
 CLR = {
-    "hdr_bg":  "1F4E79", "hdr_fg":  "FFFFFF",
+    "hdr_bg": "1F4E79", "hdr_fg": "FFFFFF",
     "safe_bg": "C6EFCE", "safe_fg": "276221",
-    "rev_bg":  "FFEB9C", "rev_fg":  "9C6500",
-    "del_bg":  "FFC7CE", "del_fg":  "9C0006",
-    "na_bg":   "D9D9D9", "na_fg":   "595959",
-    "dry_bg":  "DDEBF7", "dry_fg":  "1F4E79",
-    "exc_bg":  "E2EFDA", "exc_fg":  "375623",
+    "rev_bg": "FFEB9C", "rev_fg": "9C6500",
+    "del_bg": "FFC7CE", "del_fg": "9C0006",
+    "na_bg":  "D9D9D9", "na_fg":  "595959",
+    "dry_bg": "DDEBF7", "dry_fg": "1F4E79",
+    "exc_bg": "E2EFDA", "exc_fg": "375623",
 }
 
 ACTION_STYLE = {
@@ -151,8 +151,8 @@ DEL_HEADERS = [
 ]
 
 COL_ALIASES = {
-    "endpoint name": "Endpoint Name", "endpointname": "Endpoint Name",
-    "name":          "Endpoint Name",
+    "endpoint name":  "Endpoint Name",  "endpointname": "Endpoint Name",
+    "name":           "Endpoint Name",
     "resource group": "Resource Group", "resourcegroup": "Resource Group",
     "rg":             "Resource Group",
 }
@@ -165,37 +165,28 @@ def normalize_key(value: str) -> str:
     """Normalise a column header for flexible matching."""
     return str(value).replace("\ufeff", "").strip().lower().replace(" ", "").replace("_", "")
 
-
 def normalize_value(value: str) -> str:
     """Normalise an approval cell value for flexible matching."""
     return str(value).replace("\ufeff", "").strip().lower()
 
+def get_approval_value(ep) -> str:
+    """
+    Safely read ApprovedToDelete from a dict or object row.
+
+    * Handles None values
+    * Strips whitespace
+    * Returns a lowercase-normalised string for comparison
+
+    Example:
+        approved = get_approval_value(ep)
+        if approved == "yes":
+            ...
+    """
+    return str(ep.get("ApprovedToDelete", "") if isinstance(ep, dict) else "").strip().lower()
 
 def is_approved(value: str) -> bool:
     """Return True if the normalised value represents an approval."""
     return normalize_value(value) in {"yes", "y", "true", "1", "approved"}
-
-
-def get_approval_value(row: dict) -> str:
-    """
-    Search a CSV row for an approval column using flexible key matching.
-
-    Accepted column names (after normalisation):
-        approvedtodelete, approved, deleteapproved, approveddelete, deleteapproval
-    """
-    approval_keys = [
-        "approvedtodelete",
-        "approved",
-        "deleteapproved",
-        "approveddelete",
-        "deleteapproval",
-    ]
-    normalized_row = {normalize_key(k): v for k, v in row.items()}
-    for key in approval_keys:
-        if key in normalized_row:
-            return normalized_row[key]
-    return ""
-
 
 # Substrings in Recommended Action that hard-block deletion
 _BLOCK_SUBSTRINGS = ("Do Not Delete", "Endpoint Not Found", "Terraform Managed", "Excluded")
@@ -206,7 +197,7 @@ _BLOCK_SUBSTRINGS = ("Do Not Delete", "Endpoint Not Found", "Terraform Managed",
 
 def load_exclusions(path: str = "exclusions.txt") -> set:
     """Load endpoint names to exclude from deletion from a plain-text file.
-    One endpoint name per line.  Lines starting with # are comments."""
+    One endpoint name per line. Lines starting with # are comments."""
     excluded = set()
     if not os.path.isfile(path):
         return excluded
@@ -256,7 +247,7 @@ def validate_azure_login() -> dict:
     log.error("  Service principal login:")
     log.error("    az login --service-principal -u <appId> -p <password> --tenant <tenant>")
     log.error("")
-    log.error("After login, verify with:  az account show")
+    log.error("After login, verify with: az account show")
     log.error("=" * 60)
     sys.exit(1)
 
@@ -274,8 +265,8 @@ def _az_with_retry(args: list, retries: int = 3, timeout: int = 30):
             if r.returncode == 0 and r.stdout.strip():
                 return json.loads(r.stdout)
             if attempt < retries:
-                wait = 2 ** attempt          # 2, 4, 8 seconds
-                log.debug("  az retry %d/%d in %ds  cmd=%s", attempt, retries, wait, args[:3])
+                wait = 2 ** attempt  # 2, 4, 8 seconds
+                log.debug("  az retry %d/%d in %ds cmd=%s", attempt, retries, wait, args[:3])
                 time.sleep(wait)
         except subprocess.TimeoutExpired:
             log.debug("  az timeout on attempt %d/%d", attempt, retries)
@@ -307,7 +298,7 @@ def set_subscription(name: str) -> bool:
     if r.returncode == 0:
         log.debug("  Subscription set: %s", name)
         return True
-    log.debug("  Failed to set subscription: %s  stderr=%s", name, r.stderr[:200])
+    log.debug("  Failed to set subscription: %s stderr=%s", name, r.stderr[:200])
     return False
 
 def verify_subscription_context(expected_sub: str) -> bool:
@@ -373,14 +364,14 @@ def export_endpoint_backup(pe: dict, name: str, rg: str, sub: str,
     fpath = os.path.join(subdir, fname)
     payload = {
         "backup_timestamp": datetime.utcnow().isoformat() + "Z",
-        "subscription": sub,
-        "resource_group": rg,
-        "endpoint_name": name,
-        "arm_resource": pe,
+        "subscription":     sub,
+        "resource_group":   rg,
+        "endpoint_name":    name,
+        "arm_resource":     pe,
     }
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, default=str)
-    log.info("    Backup: %s", fpath)
+    log.info("  Backup: %s", fpath)
     return fpath
 
 # ===========================================================================
@@ -439,15 +430,27 @@ def decide(conn_state: str, backend_exists: str, tf_managed: str) -> tuple:
 # ===========================================================================
 
 def load_endpoints(path: str) -> list:
+    """Load endpoint rows from a CSV or Excel file.
+
+    Improvements:
+    - Strips whitespace from column headers to handle trailing spaces from Excel
+    - Fills NaN values with empty strings before processing
+    - Supports both .xlsx/.xls and .csv formats
+    """
     path = path.strip()
     if not os.path.isfile(path):
         log.error("Input file not found: %s", path)
         sys.exit(1)
     ext = Path(path).suffix.lower()
     if ext in (".xlsx", ".xls"):
-        df = pd.read_excel(path, dtype=str).fillna("")
+        df = pd.read_excel(path, dtype=str)
     else:
-        df = pd.read_csv(path, dtype=str).fillna("")
+        df = pd.read_csv(path, dtype=str)
+
+    # Strip whitespace from column names and fill NaN before any processing
+    df.columns = df.columns.str.strip()
+    df = df.fillna("")
+
     rename = {}
     for col in df.columns:
         key = col.strip().lower().replace(" ", "")
@@ -461,6 +464,11 @@ def load_endpoints(path: str) -> list:
     for col in ("Resource Group", "ApprovedToDelete"):
         if col not in df.columns:
             df[col] = ""
+    log.info(
+        "Input file loaded: %d row(s), columns: %s",
+        len(df),
+        list(df.columns),
+    )
     return df.to_dict(orient="records")
 
 # ===========================================================================
@@ -473,15 +481,15 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
     name = str(ep.get("Endpoint Name", "")).strip()
     rg   = str(ep.get("Resource Group", "")).strip()
     rec  = {
-        "Endpoint Name":      name,
-        "Resource Group":     rg,
-        "Subscription":       "",
-        "Connection State":   "Not Found",
-        "Backend Resource":   "",
-        "Backend Exists":     "Unknown",
-        "Terraform Managed":  "Unknown",
+        "Endpoint Name":    name,
+        "Resource Group":   rg,
+        "Subscription":     "",
+        "Connection State": "Not Found",
+        "Backend Resource": "",
+        "Backend Exists":   "Unknown",
+        "Terraform Managed":"Unknown",
         "Recommended Action": "",
-        "Notes":              "",
+        "Notes":            "",
     }
     if not name:
         rec["Recommended Action"] = "Skipped - Empty Name"
@@ -502,7 +510,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
         pe = get_private_endpoint(name, rg)
         if pe is None and not rg:
             all_pe = _az(["network", "private-endpoint", "list",
-                           "--query", f"[?name=='{name}']"])
+                          "--query", f"[?name=='{name}']"])
             if all_pe:
                 pe = all_pe[0]
                 rec["Resource Group"] = pe.get("resourceGroup", rg)
@@ -521,9 +529,9 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
             break
 
     if rec["Subscription"] == "":
-        rec["Connection State"]   = "Endpoint Not Found"
-        rec["Notes"]              = "Not found in any scanned subscription."
-        rec["Recommended Action"] = "Endpoint Not Found / Check Subscription or Access"
+        rec["Connection State"]    = "Endpoint Not Found"
+        rec["Notes"]               = "Not found in any scanned subscription."
+        rec["Recommended Action"]  = "Endpoint Not Found / Check Subscription or Access"
         rec.update(original_row)
         return rec
 
@@ -540,7 +548,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
 # Excel helpers
 # ===========================================================================
 
-def _fill(c):            return PatternFill("solid", fgColor=c)
+def _fill(c): return PatternFill("solid", fgColor=c)
 def _font(c, bold=False): return Font(color=c, bold=bold, name="Calibri", size=10)
 def _border():
     s = Side(style="thin", color="BFBFBF")
@@ -559,7 +567,7 @@ def build_excel(results: list, path: str, run_date: str):
     ws["A1"] = "EDAV Disconnected Private Endpoint Governance Report"
     ws["A1"].font = Font(name="Calibri", size=16, bold=True, color=CLR["hdr_bg"])
     ws.merge_cells("A1:D1")
-    ws["A2"] = f"Generated: {run_date}   |   EDAV Monitor v{VERSION}"
+    ws["A2"] = f"Generated: {run_date} | EDAV Monitor v{VERSION}"
     ws["A2"].font = Font(name="Calibri", size=10, italic=True, color="595959")
     ws.merge_cells("A2:D2")
 
@@ -572,22 +580,22 @@ def build_excel(results: list, path: str, run_date: str):
     ws["B4"] = "Count"
     ws["C4"] = "% of Total"
     for cell in [ws["A4"], ws["B4"], ws["C4"]]:
-        cell.fill      = _fill(CLR["hdr_bg"])
-        cell.font      = _font(CLR["hdr_fg"], bold=True)
+        cell.fill = _fill(CLR["hdr_bg"])
+        cell.font = _font(CLR["hdr_fg"], bold=True)
         cell.alignment = Alignment(horizontal="center")
     total = len(results) or 1
     row = 5
     for action, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
-        style  = ACTION_STYLE.get(action, ("na_bg", "na_fg"))
+        style = ACTION_STYLE.get(action, ("na_bg", "na_fg"))
         bg, fg = CLR[style[0]], CLR[style[1]]
-        ws.cell(row=row, column=1, value=action).fill        = _fill(bg)
-        ws.cell(row=row, column=1).font                      = _font(fg)
-        ws.cell(row=row, column=2, value=count).fill         = _fill(bg)
-        ws.cell(row=row, column=2).font                      = _font(fg)
-        ws.cell(row=row, column=2).alignment                 = Alignment(horizontal="center")
+        ws.cell(row=row, column=1, value=action).fill = _fill(bg)
+        ws.cell(row=row, column=1).font = _font(fg)
+        ws.cell(row=row, column=2, value=count).fill = _fill(bg)
+        ws.cell(row=row, column=2).font = _font(fg)
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="center")
         ws.cell(row=row, column=3, value=f"{count/total*100:.1f}%").fill = _fill(bg)
-        ws.cell(row=row, column=3).font                      = _font(fg)
-        ws.cell(row=row, column=3).alignment                 = Alignment(horizontal="center")
+        ws.cell(row=row, column=3).font = _font(fg)
+        ws.cell(row=row, column=3).alignment = Alignment(horizontal="center")
         row += 1
 
     ws.column_dimensions["A"].width = 55
@@ -598,10 +606,10 @@ def build_excel(results: list, path: str, run_date: str):
     ws2 = wb.create_sheet("All Endpoints")
     for ci, h in enumerate(SCAN_HEADERS, 1):
         c = ws2.cell(row=1, column=ci, value=h)
-        c.fill      = _fill(CLR["hdr_bg"])
-        c.font      = _font(CLR["hdr_fg"], bold=True)
+        c.fill = _fill(CLR["hdr_bg"])
+        c.font = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border    = _border()
+        c.border = _border()
 
     for ri, rec in enumerate(results, 2):
         action = rec.get("Recommended Action", "")
@@ -609,32 +617,32 @@ def build_excel(results: list, path: str, run_date: str):
         bg, fg = CLR[style[0]], CLR[style[1]]
         for ci, h in enumerate(SCAN_HEADERS, 1):
             c = ws2.cell(row=ri, column=ci, value=rec.get(h, ""))
-            c.fill      = _fill(bg)
-            c.font      = _font(fg)
-            c.border    = _border()
+            c.fill = _fill(bg)
+            c.font = _font(fg)
+            c.border = _border()
             c.alignment = Alignment(wrap_text=True, vertical="top")
 
     col_w = [42, 26, 30, 20, 60, 14, 18, 45, 60]
     for i, w in enumerate(col_w, 1):
         ws2.column_dimensions[get_column_letter(i)].width = w
-    ws2.freeze_panes    = "A2"
+    ws2.freeze_panes = "A2"
     ws2.auto_filter.ref = ws2.dimensions
 
     # ---- Safe Delete sheet ----
     ws3 = wb.create_sheet("Safe Delete Candidates")
     for ci, h in enumerate(SCAN_HEADERS, 1):
         c = ws3.cell(row=1, column=ci, value=h)
-        c.fill      = _fill(CLR["hdr_bg"])
-        c.font      = _font(CLR["hdr_fg"], bold=True)
+        c.fill = _fill(CLR["hdr_bg"])
+        c.font = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center")
-        c.border    = _border()
+        c.border = _border()
     dr = 2
     for rec in results:
         if rec.get("Recommended Action") == "Safe Delete Candidate":
             for ci, h in enumerate(SCAN_HEADERS, 1):
                 c = ws3.cell(row=dr, column=ci, value=rec.get(h, ""))
-                c.fill   = _fill(CLR["safe_bg"])
-                c.font   = _font(CLR["safe_fg"])
+                c.fill = _fill(CLR["safe_bg"])
+                c.font = _font(CLR["safe_fg"])
                 c.border = _border()
             dr += 1
     ws3.freeze_panes = "A2"
@@ -643,17 +651,17 @@ def build_excel(results: list, path: str, run_date: str):
     ws4 = wb.create_sheet("Excluded")
     for ci, h in enumerate(SCAN_HEADERS, 1):
         c = ws4.cell(row=1, column=ci, value=h)
-        c.fill      = _fill(CLR["hdr_bg"])
-        c.font      = _font(CLR["hdr_fg"], bold=True)
+        c.fill = _fill(CLR["hdr_bg"])
+        c.font = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center")
-        c.border    = _border()
+        c.border = _border()
     er = 2
     for rec in results:
         if rec.get("Recommended Action") == "Excluded":
             for ci, h in enumerate(SCAN_HEADERS, 1):
                 c = ws4.cell(row=er, column=ci, value=rec.get(h, ""))
-                c.fill   = _fill(CLR["exc_bg"])
-                c.font   = _font(CLR["exc_fg"])
+                c.fill = _fill(CLR["exc_bg"])
+                c.font = _font(CLR["exc_fg"])
                 c.border = _border()
             er += 1
     ws4.freeze_panes = "A2"
@@ -665,41 +673,41 @@ def build_excel(results: list, path: str, run_date: str):
 # ===========================================================================
 
 def build_delete_excel(del_log: list, path: str, run_date: str, dry_run: bool):
-    wb  = Workbook()
-    ws  = wb.active
+    wb = Workbook()
+    ws = wb.active
     ws.title = "Delete Report"
     mode_label = "DRY RUN — No Real Changes" if dry_run else "LIVE DELETION REPORT"
-    ws["A1"] = f"EDAV Private Endpoint Deletion Report  [{mode_label}]"
+    ws["A1"] = f"EDAV Private Endpoint Deletion Report [{mode_label}]"
     ws["A1"].font = Font(name="Calibri", size=14, bold=True,
                          color=CLR["dry_fg"] if dry_run else CLR["hdr_bg"])
     ws.merge_cells("A1:J1")
-    ws["A2"] = f"Generated: {run_date}   |   EDAV Monitor v{VERSION}"
+    ws["A2"] = f"Generated: {run_date} | EDAV Monitor v{VERSION}"
     ws["A2"].font = Font(name="Calibri", size=10, italic=True, color="595959")
     ws.merge_cells("A2:J2")
 
     for ci, h in enumerate(DEL_HEADERS, 1):
         c = ws.cell(row=4, column=ci, value=h)
-        c.fill      = _fill(CLR["hdr_bg"])
-        c.font      = _font(CLR["hdr_fg"], bold=True)
+        c.fill = _fill(CLR["hdr_bg"])
+        c.font = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border    = _border()
+        c.border = _border()
 
     result_colour = {
-        "Deleted":      ("safe_bg", "safe_fg"),
-        "Dry-Run":      ("dry_bg",  "dry_fg"),
-        "Failed":       ("del_bg",  "del_fg"),
-        "Skipped":      ("na_bg",   "na_fg"),
-        "Excluded":     ("exc_bg",  "exc_fg"),
+        "Deleted":  ("safe_bg", "safe_fg"),
+        "Dry-Run":  ("dry_bg",  "dry_fg"),
+        "Failed":   ("del_bg",  "del_fg"),
+        "Skipped":  ("na_bg",   "na_fg"),
+        "Excluded": ("exc_bg",  "exc_fg"),
     }
     for ri, row_data in enumerate(del_log, 5):
-        result         = row_data.get("Delete Result", "")
-        style          = result_colour.get(result, ("na_bg", "na_fg"))
-        bg, fg         = CLR[style[0]], CLR[style[1]]
+        result = row_data.get("Delete Result", "")
+        style  = result_colour.get(result, ("na_bg", "na_fg"))
+        bg, fg = CLR[style[0]], CLR[style[1]]
         for ci, h in enumerate(DEL_HEADERS, 1):
             c = ws.cell(row=ri, column=ci, value=row_data.get(h, ""))
-            c.fill      = _fill(bg)
-            c.font      = _font(fg)
-            c.border    = _border()
+            c.fill = _fill(bg)
+            c.font = _font(fg)
+            c.border = _border()
             c.alignment = Alignment(wrap_text=True, vertical="top")
 
     col_w = [42, 26, 30, 38, 18, 12, 20, 12, 10, 55]
@@ -708,21 +716,20 @@ def build_delete_excel(del_log: list, path: str, run_date: str, dry_run: bool):
     ws.freeze_panes = "A5"
     wb.save(path)
 
-
 def build_delete_markdown(del_log: list, path: str, run_date: str, dry_run: bool):
     def rows_by(result):
         return [r for r in del_log if r.get("Delete Result") == result]
 
-    deleted   = rows_by("Deleted")
-    dry       = rows_by("Dry-Run")
-    failed    = rows_by("Failed")
-    skipped   = rows_by("Skipped")
-    excluded  = rows_by("Excluded")
-    mode      = "DRY RUN" if dry_run else "LIVE"
+    deleted  = rows_by("Deleted")
+    dry      = rows_by("Dry-Run")
+    failed   = rows_by("Failed")
+    skipped  = rows_by("Skipped")
+    excluded = rows_by("Excluded")
+    mode     = "DRY RUN" if dry_run else "LIVE"
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# EDAV Private Endpoint Deletion Report  [{mode}]\n\n")
-        f.write(f"**Run Date:** {run_date}  |  **Mode:** {mode}  |  **Tool:** EDAV Monitor v{VERSION}\n\n")
+        f.write(f"# EDAV Private Endpoint Deletion Report [{mode}]\n\n")
+        f.write(f"**Run Date:** {run_date} | **Mode:** {mode} | **Tool:** EDAV Monitor v{VERSION}\n\n")
         f.write("| Outcome | Count |\n|---|---|\n")
         for label, lst in [("Deleted", deleted), ("Dry-Run (would delete)", dry),
                             ("Failed", failed), ("Skipped", skipped),
@@ -742,17 +749,17 @@ def build_delete_markdown(del_log: list, path: str, run_date: str, dry_run: bool
             f.write("\n")
 
         if dry_run:
-            write_table("Would Be Deleted (Dry-Run)",  dry,
+            write_table("Would Be Deleted (Dry-Run)", dry,
                         ["Endpoint Name", "Resource Group", "Subscription"])
         else:
             write_table("Deleted", deleted,
                         ["Endpoint Name", "Resource Group", "Subscription", "Timestamp", "Duration (s)"])
-        write_table("Failed",   failed,
-                    ["Endpoint Name", "Resource Group", "Error Message"])
-        write_table("Skipped",  skipped,
-                    ["Endpoint Name", "Resource Group", "Error Message"])
-        write_table("Excluded", excluded,
-                    ["Endpoint Name", "Resource Group", "Error Message"])
+            write_table("Failed", failed,
+                        ["Endpoint Name", "Resource Group", "Error Message"])
+            write_table("Skipped", skipped,
+                        ["Endpoint Name", "Resource Group", "Error Message"])
+            write_table("Excluded", excluded,
+                        ["Endpoint Name", "Resource Group", "Error Message"])
 
         f.write("---\n\n")
         f.write("> **Safety Note:** Only Azure Private Endpoint resources were targeted.\n")
@@ -764,7 +771,7 @@ def build_delete_markdown(del_log: list, path: str, run_date: str, dry_run: bool
 # ===========================================================================
 
 def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date: str):
-    path = os.path.join(output_dir, "rollback_instructions.md")
+    path    = os.path.join(output_dir, "rollback_instructions.md")
     deleted = [r for r in del_log if r.get("Delete Result") == "Deleted"]
     with open(path, "w", encoding="utf-8") as f:
         f.write("# EDAV Private Endpoint Rollback Instructions\n\n")
@@ -806,7 +813,6 @@ def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date:
     log.info("Rollback MD : %s", path)
     return path
 
-
 # ===========================================================================
 # Email
 # ===========================================================================
@@ -841,15 +847,14 @@ def build_email_html(results: list, run_date: str) -> str:
         "</body></html>"
     )
 
-
 def send_email(cfg: dict, subject: str, body: str, attachments: list):
     req = ("smtp_server", "smtp_port", "from_email", "to_email")
     if any(not cfg.get(k) for k in req):
         log.warning("Incomplete email config — skipping.")
         return
-    msg           = MIMEMultipart("mixed")
-    msg["From"]   = cfg["from_email"]
-    msg["To"]     = cfg["to_email"]
+    msg = MIMEMultipart("mixed")
+    msg["From"]    = cfg["from_email"]
+    msg["To"]      = cfg["to_email"]
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "html"))
     for fp in attachments:
@@ -872,38 +877,40 @@ def send_email(cfg: dict, subject: str, body: str, attachments: list):
     except Exception as e:
         log.error("Email failed: %s", e)
 
-
 # ===========================================================================
 # Deletion safety gate
 # ===========================================================================
 
 def _is_deletion_blocked(rec: dict, exclusions: set) -> tuple:
     """Return (blocked: bool, reason: str).
+
     A row is blocked from deletion if ANY of the following is true:
-      - Endpoint Name is blank
-      - Resource Group is blank
-      - ApprovedToDelete != 'yes' (case-insensitive)
-      - Recommended Action contains a blocking keyword
-      - Endpoint name is in the exclusions set
+    - Endpoint Name is blank
+    - Resource Group is blank
+    - ApprovedToDelete != 'yes' (case-insensitive, via get_approval_value)
+    - Endpoint name is in the exclusions set
+    - Recommended Action contains a blocking keyword
     """
     name     = str(rec.get("Endpoint Name", "")).strip()
     rg       = str(rec.get("Resource Group", "")).strip()
-    approved = normalize_value(get_approval_value(rec))
+    approved = get_approval_value(rec)   # already lowercased by get_approval_value
     action   = str(rec.get("Recommended Action", "")).strip()
 
     if not name:
         return True, "Endpoint Name is blank"
     if not rg:
         return True, "Resource Group is blank"
-    if not is_approved(approved):
-        return True, f"ApprovedToDelete='{rec.get('ApprovedToDelete','')}' — must be Yes/yes/Y/true/1/approved"
+    if approved != "yes":
+        return True, (
+            f"ApprovedToDelete='{rec.get('ApprovedToDelete', '')}' "
+            "— must be Yes / YES / yes"
+        )
     if name.lower() in exclusions:
         return True, "Listed in exclusions.txt"
     for substr in _BLOCK_SUBSTRINGS:
         if substr.lower() in action.lower():
             return True, f"Recommended Action '{action}' contains blocking keyword"
     return False, ""
-
 
 # ===========================================================================
 # The ONLY allowed delete call
@@ -929,97 +936,99 @@ def _execute_delete(name: str, rg: str) -> tuple:
 # ===========================================================================
 
 def run_delete_approved(
-    results:      list,
-    exclusions:   set,
-    output_dir:   str,
-    backup_dir:   str,
-    ts:           str,
-    run_dt:       str,
-    dry_run:      bool    = False,
-    delete_pause: float   = 2.0,
+    results: list,
+    exclusions: set,
+    output_dir: str,
+    backup_dir: str,
+    ts: str,
+    run_dt: str,
+    dry_run: bool = False,
+    delete_pause: float = 2.0,
 ) -> list:
     """
     Approval-gated deletion workflow.
 
     Safety layers enforced (in order):
-      1. --delete-approved flag required (enforced by caller)
-      2. ApprovedToDelete == 'Yes' required per row
-      3. Exclusion list checked
-      4. Recommended Action keyword block
-      5. User must type CONFIRM at interactive prompt
-      6. ARM backup exported before each delete
-      7. Pre-delete re-validation (endpoint exists AND still Disconnected)
-      8. Subscription context verified before each delete
-      9. Deletes grouped by subscription then resource group, sequential
-     10. Configurable pause between deletes
-     11. --dry-run simulates everything without touching Azure
-     12. Rollback instructions generated after run
+     1. --delete-approved flag required (enforced by caller)
+     2. ApprovedToDelete == 'yes' required per row (case-insensitive)
+     3. Exclusion list checked
+     4. Recommended Action keyword block
+     5. User must type CONFIRM at interactive prompt
+     6. ARM backup exported before each delete
+     7. Pre-delete re-validation (endpoint exists AND still Disconnected)
+     8. Subscription context verified before each delete
+     9. Deletes grouped by subscription then resource group, sequential
+    10. Configurable pause between deletes
+    11. --dry-run simulates everything without touching Azure
+    12. Rollback instructions generated after run
     """
     mode = "DRY RUN" if dry_run else "LIVE DELETE"
     log.info("")
     log.info("=" * 70)
-    log.info("DELETE-APPROVED MODE  [%s]", mode)
+    log.info("DELETE-APPROVED MODE [%s]", mode)
     log.info("=" * 70)
 
     del_log = []
 
     # ------------------------------------------------------------------
-    # RAW APPROVAL DEBUG
+    # Build approved_rows list using get_approval_value
     # ------------------------------------------------------------------
+    approved_rows = []
+    skipped_rows  = []
+    for r in results:
+        approved = get_approval_value(r)   # lowercased, stripped
+        if approved == "yes":
+            approved_rows.append(r)
+        else:
+            skipped_rows.append(r)
+
+    total_approved_count = len(approved_rows)
+
+    log.info("")
     log.info("=" * 70)
-    log.info("RAW APPROVAL DEBUG")
+    log.info("APPROVAL SCAN RESULTS")
     log.info("=" * 70)
-    for idx, r in enumerate(results[:10]):
+    log.info("  Total rows in input    : %d", len(results))
+    log.info("  Rows approved (Yes)    : %d", total_approved_count)
+    log.info("  Rows skipped (non-Yes) : %d", len(skipped_rows))
+
+    # Log first few skipped rows for visibility
+    if skipped_rows:
+        log.info("  Skipped row examples (ApprovedToDelete is not 'Yes'):")
+        for r in skipped_rows[:5]:
+            log.info(
+                "    SKIPPED | %-40s | ApprovedToDelete=%r",
+                r.get("Endpoint Name", "(blank)"),
+                r.get("ApprovedToDelete", ""),
+            )
+
+    # ------------------------------------------------------------------
+    # Zero-approval guard (requirement 7)
+    # ------------------------------------------------------------------
+    if total_approved_count == 0:
+        log.warning("No rows marked ApprovedToDelete=Yes")
+        log.warning(
+            "Ensure the input file has a column named 'ApprovedToDelete' "
+            "with the value 'Yes' for endpoints you want to delete."
+        )
+        _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
+        generate_rollback(del_log, backup_dir, output_dir, run_dt)
+        return del_log
+
+    log.info("")
+    log.info("Approved endpoints queued for %s:",
+             "simulation" if dry_run else "deletion")
+    for r in approved_rows:
         log.info(
-            "ROW %s | approval raw=%r | normalized=%r | approved=%s",
-            idx + 1,
-            get_approval_value(r),
-            normalize_value(get_approval_value(r)),
-            is_approved(get_approval_value(r))
+            "  -> %-45s RG=%-25s Sub=%s",
+            r.get("Endpoint Name", ""),
+            r.get("Resource Group", ""),
+            r.get("Subscription", ""),
         )
     log.info("=" * 70)
 
     # ------------------------------------------------------------------
-    # Build approved_rows list
-    # ------------------------------------------------------------------
-    approved_rows = []
-    for r in results:
-        approval_value = get_approval_value(r)
-        if is_approved(approval_value):
-            approved_rows.append(r)
-    total_approved_count = len(approved_rows)
-
-    # Detect which column name was found in the data
-    detected_col = "not detected"
-    if results:
-        approval_keys_norm = [
-            "approvedtodelete", "approved", "deleteapproved",
-            "approveddelete", "deleteapproval",
-        ]
-        norm_sample = {normalize_key(k): k for k in results[0].keys()}
-        for ak in approval_keys_norm:
-            if ak in norm_sample:
-                detected_col = norm_sample[ak]
-                break
-
-    log.info("")
-    log.info("=" * 70)
-    log.info("DELETE MODE — Approval Debug")
-    log.info("=" * 70)
-    log.info("  Detected approval column : %s", detected_col)
-    log.info("  Total approved rows      : %d", total_approved_count)
-    if approved_rows:
-        log.info("First approved endpoint examples:")
-        for x in approved_rows[:5]:
-            log.info(
-                "  -> %s | approval=%r",
-                x.get("Endpoint Name", ""),
-                get_approval_value(x)
-            )
-    log.info("=" * 70)
-
-    # ------------------------------------------------------------------
-    # Pass 1 — screening
+    # Pass 1 — safety gate screening
     # ------------------------------------------------------------------
     candidates = []
     for rec in approved_rows:
@@ -1027,39 +1036,38 @@ def run_delete_approved(
         if blocked:
             result_label = "Excluded" if "exclusions.txt" in reason else "Skipped"
             entry = {
-                "Endpoint Name":     rec.get("Endpoint Name", ""),
-                "Resource Group":    rec.get("Resource Group", ""),
-                "Subscription":      rec.get("Subscription", ""),
+                "Endpoint Name":    rec.get("Endpoint Name", ""),
+                "Resource Group":   rec.get("Resource Group", ""),
+                "Subscription":     rec.get("Subscription", ""),
                 "Recommended Action": rec.get("Recommended Action", ""),
-                "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
-                "Delete Result":     result_label,
-                "Timestamp":         "",
-                "Duration (s)":      "",
-                "Dry Run":           str(dry_run),
-                "Error Message":     reason,
+                "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
+                "Delete Result":    result_label,
+                "Timestamp":        "",
+                "Duration (s)":     "",
+                "Dry Run":          str(dry_run),
+                "Error Message":    reason,
             }
             del_log.append(entry)
-            if is_approved(get_approval_value(rec)):
-                log.warning("  BLOCKED [%s]: %s  — %s",
-                            result_label, rec.get("Endpoint Name", "(empty)"), reason)
+            log.warning("  BLOCKED [%s]: %s — %s",
+                        result_label, rec.get("Endpoint Name", "(empty)"), reason)
         else:
             candidates.append(rec)
 
     if not candidates:
-        log.info("No rows qualify for deletion.")
-        log.info("Nothing will be %s.", "simulated" if dry_run else "deleted")
+        log.info("No rows passed the safety gate — nothing will be %s.",
+                 "simulated" if dry_run else "deleted")
         _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
         generate_rollback(del_log, backup_dir, output_dir, run_dt)
         return del_log
 
     # ------------------------------------------------------------------
-    # Display queued list
+    # Display final queued list
     # ------------------------------------------------------------------
     log.info("")
     log.info("Endpoints queued for %s (%d):",
              "simulation" if dry_run else "deletion", len(candidates))
     for rec in candidates:
-        log.info("  - %-45s  RG=%-25s  Sub=%s",
+        log.info("  - %-45s RG=%-25s Sub=%s",
                  rec["Endpoint Name"], rec["Resource Group"],
                  rec.get("Subscription", ""))
 
@@ -1079,16 +1087,16 @@ def run_delete_approved(
             log.info("Deletion cancelled — user did not type CONFIRM.")
             for rec in candidates:
                 del_log.append({
-                    "Endpoint Name":     rec["Endpoint Name"],
-                    "Resource Group":    rec["Resource Group"],
-                    "Subscription":      rec.get("Subscription", ""),
+                    "Endpoint Name":    rec["Endpoint Name"],
+                    "Resource Group":   rec["Resource Group"],
+                    "Subscription":     rec.get("Subscription", ""),
                     "Recommended Action": rec.get("Recommended Action", ""),
-                    "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
-                    "Delete Result":     "Skipped",
-                    "Timestamp":         datetime.now().isoformat(),
-                    "Duration (s)":      "",
-                    "Dry Run":           "False",
-                    "Error Message":     "Cancelled by user at CONFIRM prompt",
+                    "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
+                    "Delete Result":    "Skipped",
+                    "Timestamp":        datetime.now().isoformat(),
+                    "Duration (s)":     "",
+                    "Dry Run":          "False",
+                    "Error Message":    "Cancelled by user at CONFIRM prompt",
                 })
             _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
             generate_rollback(del_log, backup_dir, output_dir, run_dt)
@@ -1116,35 +1124,36 @@ def run_delete_approved(
                 for rg, recs in rg_map.items():
                     for rec in recs:
                         del_log.append({
-                            "Endpoint Name":     rec["Endpoint Name"],
-                            "Resource Group":    rg,
-                            "Subscription":      sub,
-                            "Recommended Action": rec.get("Recommended Action",""),
-                            "ApprovedToDelete":  rec.get("ApprovedToDelete",""),
-                            "Delete Result":     "Failed",
-                            "Timestamp":         datetime.now().isoformat(),
-                            "Duration (s)":      "",
-                            "Dry Run":           str(dry_run),
-                            "Error Message":     f"Cannot set subscription context to '{sub}'",
+                            "Endpoint Name":    rec["Endpoint Name"],
+                            "Resource Group":   rg,
+                            "Subscription":     sub,
+                            "Recommended Action": rec.get("Recommended Action", ""),
+                            "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
+                            "Delete Result":    "Failed",
+                            "Timestamp":        datetime.now().isoformat(),
+                            "Duration (s)":     "",
+                            "Dry Run":          str(dry_run),
+                            "Error Message":    f"Cannot set subscription context to '{sub}'",
                         })
+                        log.error("    FAILED subscription context: %s", rec["Endpoint Name"])
                 continue
 
         for rg, recs in rg_map.items():
             log.info("    Resource Group: %s", rg)
             for rec in recs:
-                name  = rec["Endpoint Name"]
+                name    = rec["Endpoint Name"]
                 t_start = time.time()
-                entry = {
-                    "Endpoint Name":     name,
-                    "Resource Group":    rg,
-                    "Subscription":      sub,
-                    "Recommended Action": rec.get("Recommended Action",""),
-                    "ApprovedToDelete":  rec.get("ApprovedToDelete",""),
-                    "Delete Result":     "",
-                    "Timestamp":         datetime.now().isoformat(),
-                    "Duration (s)":      "",
-                    "Dry Run":           str(dry_run),
-                    "Error Message":     "",
+                entry   = {
+                    "Endpoint Name":    name,
+                    "Resource Group":   rg,
+                    "Subscription":     sub,
+                    "Recommended Action": rec.get("Recommended Action", ""),
+                    "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
+                    "Delete Result":    "",
+                    "Timestamp":        datetime.now().isoformat(),
+                    "Duration (s)":     "",
+                    "Dry Run":          str(dry_run),
+                    "Error Message":    "",
                 }
 
                 if dry_run:
@@ -1155,7 +1164,7 @@ def run_delete_approved(
                     continue
 
                 # --- Pre-delete ARM backup ---
-                log.info("      [Backup] %s ...", name)
+                log.info("      [Backup]   %s ...", name)
                 pe_data = get_private_endpoint(name, rg)
                 if pe_data:
                     os.makedirs(backup_dir, exist_ok=True)
@@ -1168,9 +1177,9 @@ def run_delete_approved(
                 valid, reason = private_endpoint_still_valid_for_delete(name, rg, sub)
                 if not valid:
                     log.warning("      SKIPPED: %s — %s", name, reason)
-                    entry["Delete Result"]  = "Skipped"
-                    entry["Duration (s)"]   = f"{time.time()-t_start:.1f}"
-                    entry["Error Message"]  = reason
+                    entry["Delete Result"] = "Skipped"
+                    entry["Duration (s)"]  = f"{time.time()-t_start:.1f}"
+                    entry["Error Message"] = reason
                     del_log.append(entry)
                     continue
 
@@ -1178,23 +1187,23 @@ def run_delete_approved(
                 if not verify_subscription_context(sub):
                     msg = f"Subscription context mismatch — expected '{sub}'"
                     log.error("      FAILED: %s — %s", name, msg)
-                    entry["Delete Result"]  = "Failed"
-                    entry["Duration (s)"]   = f"{time.time()-t_start:.1f}"
-                    entry["Error Message"]  = msg
+                    entry["Delete Result"] = "Failed"
+                    entry["Duration (s)"]  = f"{time.time()-t_start:.1f}"
+                    entry["Error Message"] = msg
                     del_log.append(entry)
                     continue
 
                 # --- Execute delete (the ONLY az delete command) ---
-                log.info("      [DELETE] %s  RG=%s  Sub=%s", name, rg, sub)
+                log.info("      [DELETE]   %s  RG=%s  Sub=%s", name, rg, sub)
                 ok, err = _execute_delete(name, rg)
                 elapsed = f"{time.time()-t_start:.1f}"
                 if ok:
-                    log.info("      -> Deleted  (%.1fs)", float(elapsed))
+                    log.info("      -> Deleted OK (%.1fs)", float(elapsed))
                     entry["Delete Result"] = "Deleted"
                 else:
-                    log.error("      -> FAILED  %s", err)
-                    entry["Delete Result"]  = "Failed"
-                    entry["Error Message"]  = err
+                    log.error("      -> FAILED: %s", err)
+                    entry["Delete Result"] = "Failed"
+                    entry["Error Message"] = err
                 entry["Duration (s)"] = elapsed
                 del_log.append(entry)
 
@@ -1210,7 +1219,7 @@ def run_delete_approved(
 
     log.info("")
     log.info("=" * 70)
-    log.info("DELETION SUMMARY  [%s]", mode)
+    log.info("DELETION SUMMARY [%s]", mode)
     if dry_run:
         log.info("  Would-Delete : %d", _count("Dry-Run"))
     else:
@@ -1220,15 +1229,23 @@ def run_delete_approved(
     log.info("  Excluded     : %d", _count("Excluded"))
     log.info("=" * 70)
 
+    # Log failed endpoints separately
+    failed_entries = [r for r in del_log if r["Delete Result"] == "Failed"]
+    if failed_entries:
+        log.error("FAILED DELETIONS (%d):", len(failed_entries))
+        for r in failed_entries:
+            log.error("  - %-45s RG=%-25s Error=%s",
+                      r["Endpoint Name"], r["Resource Group"],
+                      r.get("Error Message", ""))
+
     _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
     generate_rollback(del_log, backup_dir, output_dir, run_dt)
     return del_log
 
-
 def _write_delete_reports(del_log: list, output_dir: str, ts: str,
                           run_dt: str, dry_run: bool):
-    prefix    = "EDAV_DryRun_Report" if dry_run else "EDAV_Delete_Report"
-    md_prefix = "dryrun_summary"     if dry_run else "delete_summary"
+    prefix    = "EDAV_DryRun_Report"  if dry_run else "EDAV_Delete_Report"
+    md_prefix = "dryrun_summary"      if dry_run else "delete_summary"
     del_csv   = os.path.join(output_dir, f"{prefix}_{ts}.csv")
     del_xlsx  = os.path.join(output_dir, f"{prefix}_{ts}.xlsx")
     del_md    = os.path.join(output_dir, f"{md_prefix}_{ts}.md")
@@ -1268,19 +1285,19 @@ Examples:
       --terraform-path C:\\terraform-scripts --delete-approved --delete-pause 5
 """,
     )
-    p.add_argument("--input",          required=True,
-                   help="Path to CSV or Excel input file")
-    p.add_argument("--subscriptions",  default="",
+    p.add_argument("--input", required=True,
+                   help="Path to CSV or Excel input file (.csv, .xlsx, .xls)")
+    p.add_argument("--subscriptions", default="",
                    help="Comma-separated Azure subscription names to scan")
     p.add_argument("--terraform-path", default="",
                    help="Local Terraform repo path for ownership checks (optional)")
-    p.add_argument("--output-dir",     default="reports",
+    p.add_argument("--output-dir", default="reports",
                    help="Directory for output reports (default: reports/)")
-    p.add_argument("--backup-dir",     default="backups",
+    p.add_argument("--backup-dir", default="backups",
                    help="Directory for ARM JSON backups before deletion (default: backups/)")
-    p.add_argument("--log-dir",        default="logs",
+    p.add_argument("--log-dir", default="logs",
                    help="Directory for structured log files (default: logs/)")
-    p.add_argument("--exclusions",     default="exclusions.txt",
+    p.add_argument("--exclusions", default="exclusions.txt",
                    help="Path to exclusions file (default: exclusions.txt)")
     p.add_argument("--delete-approved", action="store_true", default=False,
                    help=(
@@ -1289,17 +1306,17 @@ Examples:
                        "USE ONLY AFTER AN APPROVED CHANGE REQUEST. "
                        "Combine with --dry-run to simulate first."
                    ))
-    p.add_argument("--dry-run",        action="store_true", default=False,
+    p.add_argument("--dry-run", action="store_true", default=False,
                    help="Simulate deletions only — no Azure resources are modified. "
                         "Requires --delete-approved.")
-    p.add_argument("--delete-pause",   type=float, default=2.0,
+    p.add_argument("--delete-pause", type=float, default=2.0,
                    help="Seconds to pause between deletes (default: 2.0)")
-    p.add_argument("--email-to",    default="", help="Recipient email(s), comma-separated")
-    p.add_argument("--email-from",  default="", help="Sender email address")
-    p.add_argument("--smtp-server", default="", help="SMTP server hostname")
-    p.add_argument("--smtp-port",   default="587", help="SMTP port (default: 587)")
-    p.add_argument("--smtp-user",   default="", help="SMTP username")
-    p.add_argument("--smtp-pass",   default="", help="SMTP password")
+    p.add_argument("--email-to",      default="", help="Recipient email(s), comma-separated")
+    p.add_argument("--email-from",    default="", help="Sender email address")
+    p.add_argument("--smtp-server",   default="", help="SMTP server hostname")
+    p.add_argument("--smtp-port",     default="587", help="SMTP port (default: 587)")
+    p.add_argument("--smtp-user",     default="", help="SMTP username")
+    p.add_argument("--smtp-pass",     default="", help="SMTP password")
     return p.parse_args()
 
 # ===========================================================================
@@ -1316,7 +1333,7 @@ def main():
     log, log_path = setup_logging(args.log_dir, ts)
 
     log.info("=" * 70)
-    log.info("EDAV Private Endpoint Monitor  v%s", VERSION)
+    log.info("EDAV Private Endpoint Monitor v%s", VERSION)
     log.info("Run: %s", run_dt)
     log.info("Thread: %s", threading.current_thread().name)
     if args.delete_approved and args.dry_run:
@@ -1336,9 +1353,9 @@ def main():
     if not subs:
         log.info("No subscriptions specified — auto-detecting...")
         subs = get_subscriptions()
-    if not subs:
-        log.error("No Azure subscriptions found. Run: az login --use-device-code")
-        sys.exit(1)
+        if not subs:
+            log.error("No Azure subscriptions found. Run: az login --use-device-code")
+            sys.exit(1)
     log.info("Subscriptions: %s", subs)
 
     # ---- Terraform ----
@@ -1372,7 +1389,7 @@ def main():
     # ---- Validation reports ----
     df_out = pd.DataFrame(results, columns=SCAN_HEADERS + ["ApprovedToDelete"])
     df_out.to_csv(csv_out, index=False)
-    log.info("Validation CSV  : %s", csv_out)
+    log.info("Validation CSV : %s", csv_out)
     build_excel(results, xlsx_out, run_dt)
     log.info("Validation XLSX : %s", xlsx_out)
 
@@ -1383,15 +1400,15 @@ def main():
 
     log.info("")
     log.info("=" * 70)
-    log.info("VALIDATION SUMMARY  (Total: %d)", len(results))
+    log.info("VALIDATION SUMMARY (Total: %d)", len(results))
     log.info("=" * 70)
     for a, c in sorted(counts.items(), key=lambda x: x[1], reverse=True):
-        log.info("  %-52s  %d", a, c)
+        log.info("  %-52s %d", a, c)
     log.info("=" * 70)
 
     with open(md_out, "w", encoding="utf-8") as f:
         f.write("# EDAV Private Endpoint Validation Summary\n\n")
-        f.write(f"**Run Date:** {run_dt}  |  **Total:** {len(results)}  |  "
+        f.write(f"**Run Date:** {run_dt} | **Total:** {len(results)} | "
                 f"**Tool:** EDAV Monitor v{VERSION}\n\n")
         f.write("| Action | Count | % |\n|---|---|---|\n")
         total = len(results) or 1
@@ -1399,7 +1416,7 @@ def main():
             f.write(f"| {a} | {c} | {c/total*100:.1f}% |\n")
         f.write(f"\n**Reports saved to:** {args.output_dir}\n")
         f.write(f"\n**Log file:** {log_path}\n")
-    log.info("Validation MD   : %s", md_out)
+    log.info("Validation MD  : %s", md_out)
 
     # ---- Delete mode ----
     if args.delete_approved:
@@ -1426,20 +1443,20 @@ def main():
     # ---- Email ----
     if args.email_to and args.smtp_server:
         cfg = dict(
-            smtp_server  = args.smtp_server,
-            smtp_port    = args.smtp_port,
-            from_email   = args.email_from,
-            to_email     = args.email_to,
-            smtp_user    = args.smtp_user,
-            smtp_pass    = args.smtp_pass,
-            use_tls      = True,
+            smtp_server = args.smtp_server,
+            smtp_port   = args.smtp_port,
+            from_email  = args.email_from,
+            to_email    = args.email_to,
+            smtp_user   = args.smtp_user,
+            smtp_pass   = args.smtp_pass,
+            use_tls     = True,
         )
         subj = (f"EDAV Endpoint Governance | {run_dt} | "
                 f"{counts.get('Safe Delete Candidate', 0)} Safe Delete Candidates")
         send_email(cfg, subj, build_email_html(results, run_dt), [xlsx_out, csv_out])
 
     log.info("")
-    log.info("Done. Reports in: %s   Log: %s", args.output_dir, log_path)
+    log.info("Done. Reports in: %s  Log: %s", args.output_dir, log_path)
 
 
 if __name__ == "__main__":
