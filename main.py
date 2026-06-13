@@ -444,7 +444,7 @@ def run_post_delete_verification(del_log: list, dry_run: bool = False) -> list:
             "Verification Status":   "Not Applicable",
             "Azure Response":        "No delete attempted",
             "Verification Timestamp": datetime.now().isoformat(),
-            "Verification Notes":    f"Delete result was '{rec.get(\"Delete Result\", \'\')}' -- verification not required",
+            "Verification Notes":    ("Delete result was '" + str(rec.get("Delete Result", "")) + "' -- verification not required"),
         })
 
     # Summary
@@ -685,12 +685,15 @@ def _is_deletion_blocked(rec: dict, exclusions: set, denylist: set = None) -> tu
     if not rg:
         return True, "Resource Group is blank"
     if name.lower() in denylist:
-        return True, f"\'{name}\' is on the denylist -- hard blocked"
+        return True, f"'{name}' is on the denylist -- hard blocked"
     if name.lower() in exclusions:
         return True, "Listed in exclusions.txt"
     if approved != "yes":
-        return True, (f"ApprovedToDelete='{rec.get(\"ApprovedToDelete\", \'\')}' "
-                      "-- must be Yes / YES / yes")
+        return True, (
+            "ApprovedToDelete='"
+            + str(rec.get("ApprovedToDelete", ""))
+            + "' -- must be Yes / YES / yes"
+        )
     for substr in _BLOCK_SUBSTRINGS:
         if substr.lower() in action.lower():
             return True, f"Recommended Action '{action}' contains blocking keyword"
@@ -1420,10 +1423,10 @@ def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date:
         f.write("| # | Endpoint Name | Resource Group | Subscription |\n")
         f.write("|---|---|---|---|\n")
         for i, r in enumerate(deleted, 1):
-            f.write(f"| {i} | {r[chr(39)]Endpoint Name[chr(39)]} | {r[chr(39)]Resource Group[chr(39)]} | {r[chr(39)]Subscription[chr(39)]} |\n")
+            f.write(f"| {i} | {r['Endpoint Name']} | {r['Resource Group']} | {r['Subscription']} |\n")
         f.write("\n## How to Restore an Endpoint\n\n")
         f.write("### Step 1 -- Locate the backup JSON\n")
-        f.write(f"Backups are saved in: {os.path.abspath(os.path.join(backup_dir, chr(39)+chr(39)))}\n\n")
+        f.write(f"Backups are saved in: {os.path.abspath(os.path.join(backup_dir, 'private_endpoints'))}\n\n")
         f.write("### Step 2 -- Recreate via Azure CLI\n")
         f.write("```bash\n")
         f.write("az network private-endpoint create \\\\\n")
@@ -1856,7 +1859,7 @@ def main():
             use_tls = True,
         )
         subj = (f"EDAV Endpoint Governance | {run_dt} | Mode={mode_label} | "
-                f"{counts.get(chr(39)Safe Delete Candidate{chr(39)},0)} Safe Candidates")
+                f"{counts.get('Safe Delete Candidate', 0)} Safe Candidates")
         attachments = [xlsx_out, csv_out, html_out, json_out]
         if verify_log:
             attachments += [verify_csv, verify_xlsx]
