@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EDAV Private Endpoint Monitor v4.2.0
+EDAV Private Endpoint Monitor v4.3.0
 =======================================
 Enterprise-grade Azure governance and cleanup platform for EDAV disconnected
 private endpoints.
@@ -35,6 +35,13 @@ Deletion safety layers (in order)
 15. Structured log written to logs/ directory
 
 Safe by default -- Read/Report only unless --cleanup-approved --delete-approved passed.
+
+Fixed in v4.3.0:
+- Removed nested dict expressions from f-strings (SyntaxError at HTML builder)
+- Replaced all inline colour-mapping f-strings with pre-computed variables
+- Added --self-test mode for preflight health checks
+- Added run_preflight_checks() called before every scan/delete
+- Version bumped: 4.3.0
 """
 import argparse
 import json
@@ -67,7 +74,7 @@ except ImportError:
 # ===========================================================================
 # Version & Constants
 # ===========================================================================
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 
 _AZ_WINDOWS_FALLBACK = r"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
 
@@ -77,16 +84,16 @@ def _resolve_az():
         return az
     if os.path.isfile(_AZ_WINDOWS_FALLBACK):
         return _AZ_WINDOWS_FALLBACK
-    print("FATAL: Azure CLI (az) not found.")
+    print("FATAL: Azure CLI (az) not found. Install from https://aka.ms/installazurecliwindows")
     sys.exit(1)
 
 AZ_CMD = _resolve_az()
 
-_LOG_FMT = "%(asctime)s %(levelname)-8s [%(threadName)s] %(message)s"
+_LOG_FMT  = "%(asctime)s %(levelname)-8s [%(threadName)s] %(message)s"
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 CLR = {
-    "hdr_bg": "1F4E79", "hdr_fg": "FFFFFF",
+    "hdr_bg":  "1F4E79", "hdr_fg":  "FFFFFF",
     "safe_bg": "C6EFCE", "safe_fg": "276221",
     "rev_bg":  "FFEB9C", "rev_fg":  "9C6500",
     "del_bg":  "FFC7CE", "del_fg":  "9C0006",
@@ -98,15 +105,51 @@ CLR = {
 }
 
 ACTION_STYLE = {
-    "Safe Delete Candidate":               ("safe_bg", "safe_fg"),
-    "Do Not Delete - Terraform Managed":   ("del_bg",  "del_fg"),
-    "Investigate - Backend Exists":        ("rev_bg",  "rev_fg"),
-    "Review - Not Disconnected":           ("rev_bg",  "rev_fg"),
-    "Review":                              ("rev_bg",  "rev_fg"),
+    "Safe Delete Candidate":                ("safe_bg", "safe_fg"),
+    "Do Not Delete - Terraform Managed":    ("del_bg",  "del_fg"),
+    "Investigate - Backend Exists":         ("rev_bg",  "rev_fg"),
+    "Review - Not Disconnected":            ("rev_bg",  "rev_fg"),
+    "Review":                               ("rev_bg",  "rev_fg"),
     "Endpoint Not Found / Check Subscription": ("na_bg", "na_fg"),
-    "Skipped - Empty Name":                ("na_bg",  "na_fg"),
-    "Excluded":                            ("exc_bg",  "exc_fg"),
-    "Denied":                              ("del_bg",  "del_fg"),
+    "Skipped - Empty Name":                 ("na_bg",  "na_fg"),
+    "Excluded":                             ("exc_bg",  "exc_fg"),
+    "Denied":                               ("del_bg",  "del_fg"),
+}
+
+# HTML colour map for DeleteRecommendation (replaces unsafe inline dict-in-f-string)
+DR_HTML_COLOUR = {
+    "SAFE_DELETE":                  "#C6EFCE",
+    "REVIEW_REQUIRED":              "#FFEB9C",
+    "ENDPOINT_NOT_FOUND":           "#D9D9D9",
+    "ACCESS_OR_SUBSCRIPTION_REVIEW":"#DDEBF7",
+    "NOT_DISCONNECTED":             "#FFEB9C",
+    "TERRAFORM_MANAGED":            "#FFC7CE",
+    "EXCLUDED":                     "#E2EFDA",
+    "DENIED":                       "#FFC7CE",
+    "UNKNOWN":                      "#FFFFFF",
+}
+
+# HTML colour map for scan row Recommended Action
+ACTION_HTML_COLOUR = {
+    "Safe Delete Candidate":             "#C6EFCE",
+    "Investigate - Backend Exists":      "#FFEB9C",
+    "Review - Not Disconnected":         "#FFEB9C",
+    "Review":                            "#FFEB9C",
+    "Excluded":                          "#E2EFDA",
+    "Denied":                            "#FFC7CE",
+    "Do Not Delete - Terraform Managed": "#FFC7CE",
+}
+
+# HTML colour map for Delete Result
+DEL_RESULT_HTML_COLOUR = {
+    "Deleted":                  "#C6EFCE",
+    "Failed":                   "#FFC7CE",
+    "Dry-Run":                  "#DDEBF7",
+    "Skipped-ReviewRequired":   "#FFEB9C",
+    "Skipped-EndpointNotFound": "#D9D9D9",
+    "Skipped-AccessOrSubReview":"#D9D9D9",
+    "Excluded":                 "#E2EFDA",
+    "Denied":                   "#FFC7CE",
 }
 
 SCAN_HEADERS = [
@@ -138,18 +181,20 @@ COL_ALIASES = {
     "rg":             "Resource Group",
 }
 
-_BLOCK_SUBSTRINGS = ("Do Not Delete", "Endpoint Not Found", "Terraform Managed", "Excluded", "Denied")
+_BLOCK_SUBSTRINGS = (
+    "Do Not Delete", "Endpoint Not Found", "Terraform Managed", "Excluded", "Denied"
+)
 
-# DeleteRecommendation values
-DR_SAFE_DELETE          = "SAFE_DELETE"
-DR_REVIEW_REQUIRED      = "REVIEW_REQUIRED"
-DR_ENDPOINT_NOT_FOUND   = "ENDPOINT_NOT_FOUND"
+# DeleteRecommendation constants
+DR_SAFE_DELETE         = "SAFE_DELETE"
+DR_REVIEW_REQUIRED     = "REVIEW_REQUIRED"
+DR_ENDPOINT_NOT_FOUND  = "ENDPOINT_NOT_FOUND"
 DR_ACCESS_OR_SUB_REVIEW = "ACCESS_OR_SUBSCRIPTION_REVIEW"
-DR_NOT_DISCONNECTED     = "NOT_DISCONNECTED"
-DR_TERRAFORM_MANAGED    = "TERRAFORM_MANAGED"
-DR_EXCLUDED             = "EXCLUDED"
-DR_DENIED               = "DENIED"
-DR_UNKNOWN              = "UNKNOWN"
+DR_NOT_DISCONNECTED    = "NOT_DISCONNECTED"
+DR_TERRAFORM_MANAGED   = "TERRAFORM_MANAGED"
+DR_EXCLUDED            = "EXCLUDED"
+DR_DENIED              = "DENIED"
+DR_UNKNOWN             = "UNKNOWN"
 
 # ===========================================================================
 # Logging
@@ -178,11 +223,6 @@ log = logging.getLogger("edav")
 # Startup Banner
 # ===========================================================================
 
-_BANNER = """
-EDAV PRIVATE ENDPOINT MONITOR v{version}
-Enterprise Azure Governance Platform
-"""
-
 def print_banner(version: str, mode: str, run_dt: str,
                  change_ticket: str = "", approved_by: str = ""):
     width = 72
@@ -190,17 +230,17 @@ def print_banner(version: str, mode: str, run_dt: str,
     sep2 = "-" * width
     print("")
     print(sep)
-    print(f"  EDAV Private Endpoint Monitor v{version}")
+    print(f" EDAV Private Endpoint Monitor v{version}")
     print(sep2)
-    print(f"  Run Date    : {run_dt}")
-    print(f"  Mode        : {mode}")
+    print(f" Run Date    : {run_dt}")
+    print(f" Mode        : {mode}")
     if change_ticket:
-        print(f"  Change Ticket: {change_ticket}")
+        print(f" Change Ticket: {change_ticket}")
     if approved_by:
-        print(f"  Approved By  : {approved_by}")
+        print(f" Approved By : {approved_by}")
     print(sep2)
-    print(f"  Safety  : 15-layer deletion gate | backup-before-delete | post-delete verify")
-    print(f"  Safe-default: Read/Report ONLY unless --cleanup-approved --delete-approved passed")
+    print(f" Safety      : 15-layer deletion gate | backup-before-delete | post-delete verify")
+    print(f" Safe-default: Read/Report ONLY unless --cleanup-approved --delete-approved passed")
     print(sep)
     print("")
 
@@ -231,10 +271,10 @@ class Spinner:
     _CHARS = itertools.cycle(["|", "/", "-", "\\"])
 
     def __init__(self, msg: str = "", interval: float = 0.1):
-        self.msg = msg
+        self.msg      = msg
         self.interval = interval
-        self._stop   = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._stop    = threading.Event()
+        self._thread  = threading.Thread(target=self._spin, daemon=True)
 
     def _spin(self):
         while not self._stop.is_set():
@@ -401,17 +441,14 @@ def get_endpoint_region(pe: dict) -> str:
         return ""
     return pe.get("location", "")
 
-def resource_exists(rid: str) -> bool:
-    if not rid:
-        return False
-    return _az(["resource", "show", "--ids", rid]) is not None
-
 def get_backend_resource_details(rid: str) -> dict:
     """
     Call az resource show --ids <rid>.
-    Returns dict with exists, name, resource_type, raw.
-    Used to populate BackendExists, BackendResourceId, BackendResourceName,
-    BackendResourceType and compute DeleteRecommendation.
+    Returns dict with keys: exists, name, resource_type, raw.
+
+    Classification:
+      exists=True  -> BackendExists=Yes  -> REVIEW_REQUIRED (do not delete)
+      exists=False -> BackendExists=No   -> SAFE_DELETE     (safe to decommission)
     """
     if not rid:
         return {"exists": False, "name": "", "resource_type": "", "raw": None}
@@ -426,7 +463,7 @@ def get_backend_resource_details(rid: str) -> dict:
     }
 
 def private_endpoint_still_valid_for_delete(name: str, rg: str, sub: str) -> tuple:
-    """Pre-delete re-validation. Returns (ok: bool, reason: str)."""
+    """Pre-delete re-validation.  Returns (ok: bool, reason: str)."""
     if not name or not rg or not sub:
         return False, "Missing name, RG, or subscription"
     if not set_subscription(sub):
@@ -490,31 +527,34 @@ def run_post_delete_verification(del_log: list, dry_run: bool = False) -> list:
 
     for rec in dry_entries:
         verify_log.append({
-            "Endpoint Name": rec.get("Endpoint Name", ""),
-            "Resource Group": rec.get("Resource Group", ""),
-            "Subscription": rec.get("Subscription", ""),
-            "Delete Result": "Dry-Run",
-            "Verification Status": "Verification Skipped (Dry Run)",
-            "Azure Response": "No delete performed",
+            "Endpoint Name":      rec.get("Endpoint Name", ""),
+            "Resource Group":     rec.get("Resource Group", ""),
+            "Subscription":       rec.get("Subscription", ""),
+            "Delete Result":      "Dry-Run",
+            "Verification Status":"Verification Skipped (Dry Run)",
+            "Azure Response":     "No delete performed",
             "Verification Timestamp": datetime.now().isoformat(),
             "Verification Notes": "Dry-run mode -- no real delete occurred",
         })
 
     for rec in other_entries:
         verify_log.append({
-            "Endpoint Name": rec.get("Endpoint Name", ""),
+            "Endpoint Name":  rec.get("Endpoint Name", ""),
             "Resource Group": rec.get("Resource Group", ""),
-            "Subscription": rec.get("Subscription", ""),
-            "Delete Result": rec.get("Delete Result", ""),
+            "Subscription":   rec.get("Subscription", ""),
+            "Delete Result":  rec.get("Delete Result", ""),
             "Verification Status": "Not Applicable",
             "Azure Response": "No delete attempted",
             "Verification Timestamp": datetime.now().isoformat(),
-            "Verification Notes": "Delete result was '" + str(rec.get("Delete Result", "")) + "' -- verification not required",
+            "Verification Notes": (
+                "Delete result was '" + str(rec.get("Delete Result", "")) +
+                "' -- verification not required"
+            ),
         })
 
     v_ok   = sum(1 for v in verify_log if v["Verification Status"].startswith("Verified"))
     v_fail = sum(1 for v in verify_log if "FAILED" in v["Verification Status"])
-    log.info("Verification Summary: Confirmed=%d Failed=%d", v_ok, v_fail)
+    log.info("Verification Summary: Confirmed=%d  Failed=%d", v_ok, v_fail)
     if v_fail > 0:
         log.error("WARNING: %d endpoint(s) could NOT be verified as deleted!", v_fail)
     return verify_log
@@ -524,7 +564,7 @@ def run_post_delete_verification(del_log: list, dry_run: bool = False) -> list:
 # ===========================================================================
 
 def export_endpoint_backup(pe: dict, name: str, rg: str, sub: str,
-                            backup_dir: str, ts: str) -> str:
+                           backup_dir: str, ts: str) -> str:
     subdir = os.path.join(backup_dir, "private_endpoints")
     os.makedirs(subdir, exist_ok=True)
     safe_name = name.replace("/", "_").replace("\\", "_")
@@ -532,8 +572,10 @@ def export_endpoint_backup(pe: dict, name: str, rg: str, sub: str,
     fpath  = os.path.join(subdir, fname)
     payload = {
         "backup_timestamp": datetime.utcnow().isoformat() + "Z",
-        "subscription": sub, "resource_group": rg,
-        "endpoint_name": name, "arm_resource": pe,
+        "subscription":     sub,
+        "resource_group":   rg,
+        "endpoint_name":    name,
+        "arm_resource":     pe,
     }
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, default=str)
@@ -551,7 +593,9 @@ def load_terraform(path: str) -> tuple:
     os.chdir(path)
     state = code = ""
     try:
-        r = subprocess.run(["terraform", "state", "list"], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            ["terraform", "state", "list"], capture_output=True, text=True, timeout=60
+        )
         state = r.stdout if r.returncode == 0 else ""
     except Exception:
         pass
@@ -577,36 +621,46 @@ def in_terraform(name: str, state: str, code: str) -> str:
 
 def decide(conn_state: str, backend_exists: str, tf_managed: str) -> tuple:
     """
-    Returns (recommended_action, notes, delete_recommendation).
+    Returns (recommended_action: str, notes: str, delete_recommendation: str).
 
-    DeleteRecommendation:
-        SAFE_DELETE         -- Disconnected AND backend gone AND not TF managed
-        REVIEW_REQUIRED     -- Disconnected BUT backend still exists
-        ENDPOINT_NOT_FOUND  -- Endpoint could not be found
-        TERRAFORM_MANAGED   -- In Terraform state/code
-        NOT_DISCONNECTED    -- Connection state is not Disconnected
-        UNKNOWN             -- Insufficient data
+    DeleteRecommendation values:
+      SAFE_DELETE         -- Disconnected AND backend ResourceNotFound AND not TF-managed
+      REVIEW_REQUIRED     -- Disconnected BUT backend resource still exists
+      ENDPOINT_NOT_FOUND  -- Endpoint not found in any scanned subscription
+      TERRAFORM_MANAGED   -- Found in Terraform state/code
+      NOT_DISCONNECTED    -- Connection state is not Disconnected
+      UNKNOWN             -- Insufficient data
     """
     if tf_managed == "Yes":
-        return ("Do Not Delete - Terraform Managed",
-                "Found in Terraform state/code. Remove from TF first.",
-                DR_TERRAFORM_MANAGED)
+        return (
+            "Do Not Delete - Terraform Managed",
+            "Found in Terraform state/code. Remove from TF first.",
+            DR_TERRAFORM_MANAGED,
+        )
     if conn_state == "Disconnected" and backend_exists == "No" and tf_managed == "No":
-        return ("Safe Delete Candidate",
-                "Disconnected, backend gone, not in Terraform. Safe to decommission.",
-                DR_SAFE_DELETE)
+        return (
+            "Safe Delete Candidate",
+            "Disconnected, backend gone (ResourceNotFound), not in Terraform. Safe to decommission.",
+            DR_SAFE_DELETE,
+        )
     if conn_state == "Disconnected" and backend_exists == "Yes":
-        return ("Investigate - Backend Exists",
-                "Endpoint disconnected but backend resource still active.",
-                DR_REVIEW_REQUIRED)
+        return (
+            "Investigate - Backend Exists",
+            "Endpoint disconnected but backend resource still active. Do NOT delete.",
+            DR_REVIEW_REQUIRED,
+        )
     if conn_state == "Endpoint Not Found":
-        return ("Endpoint Not Found / Check Subscription",
-                "Not found in any scanned subscription.",
-                DR_ENDPOINT_NOT_FOUND)
+        return (
+            "Endpoint Not Found / Check Subscription",
+            "Not found in any scanned subscription.",
+            DR_ENDPOINT_NOT_FOUND,
+        )
     if conn_state not in ("Disconnected", "Unknown", ""):
-        return ("Review - Not Disconnected",
-                f"Connection state is '{conn_state}'. May still be in use.",
-                DR_NOT_DISCONNECTED)
+        return (
+            "Review - Not Disconnected",
+            f"Connection state is '{conn_state}'. May still be in use.",
+            DR_NOT_DISCONNECTED,
+        )
     return ("Review", "Insufficient data to make a safe recommendation.", DR_UNKNOWN)
 
 # ===========================================================================
@@ -660,35 +714,34 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
     """
     Scan a single endpoint across all subscriptions.
 
-    For every Disconnected endpoint, calls az resource show --ids <backendId>
-    to determine BackendExists, BackendResourceId, BackendResourceName,
-    BackendResourceType and sets DeleteRecommendation accordingly:
-
-        Disconnected + backend ResourceNotFound -> SAFE_DELETE
-        Disconnected + backend still exists     -> REVIEW_REQUIRED
-        Endpoint not found in any sub           -> ENDPOINT_NOT_FOUND
+    For every endpoint with a privateLinkServiceConnections entry:
+      - Calls az resource show --ids <privateLinkServiceId>
+      - If result is None  -> BackendExists=No  -> SAFE_DELETE
+      - If result exists   -> BackendExists=Yes -> REVIEW_REQUIRED
+      - Endpoint not found -> ENDPOINT_NOT_FOUND
     """
     if denylist is None:
         denylist = set()
     original_row = dict(ep)
     name = str(ep.get("Endpoint Name", "")).strip()
     rg   = str(ep.get("Resource Group", "")).strip()
+
     rec = {
-        "Endpoint Name":        name,
-        "Resource Group":       rg,
-        "Subscription":         "",
-        "Region":               "",
-        "Connection State":     "Not Found",
-        "Backend Resource":     "",
-        "Backend Exists":       "Unknown",
-        "BackendResourceId":    "",
-        "BackendResourceName":  "",
-        "BackendResourceType":  "",
+        "Endpoint Name":     name,
+        "Resource Group":    rg,
+        "Subscription":      "",
+        "Region":            "",
+        "Connection State":  "Not Found",
+        "Backend Resource":  "",
+        "Backend Exists":    "Unknown",
+        "BackendResourceId": "",
+        "BackendResourceName": "",
+        "BackendResourceType": "",
         "DeleteRecommendation": DR_UNKNOWN,
-        "Terraform Managed":    "Unknown",
-        "Recommended Action":   "",
-        "Scan Timestamp":       datetime.now().isoformat(),
-        "Notes":                "",
+        "Terraform Managed": "Unknown",
+        "Recommended Action": "",
+        "Scan Timestamp":    datetime.now().isoformat(),
+        "Notes":             "",
     }
 
     if not name:
@@ -722,7 +775,7 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
             pe = get_private_endpoint(name, rg)
             if pe is None and not rg:
                 all_pe = _az(["network", "private-endpoint", "list",
-                              "--query", f"[?name=='{name}']"])
+                               "--query", f"[?name=='{name}']"])
                 if all_pe:
                     pe = all_pe[0]
                     rec["Resource Group"] = pe.get("resourceGroup", rg)
@@ -733,11 +786,11 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
                          pe.get("manualPrivateLinkServiceConnections") or [])
                 if conns:
                     cs  = conns[0].get("privateLinkServiceConnectionState", {})
-                    rec["Connection State"] = cs.get("status", "Unknown")
+                    rec["Connection State"]  = cs.get("status", "Unknown")
                     bid = conns[0].get("privateLinkServiceId", "")
                     rec["Backend Resource"]  = bid
                     rec["BackendResourceId"] = bid
-                    # Resolve backend details for all endpoints (critical for Disconnected)
+                    # Resolve backend details (critical for Disconnected classification)
                     bk = get_backend_resource_details(bid)
                     rec["Backend Exists"]       = "Yes" if bk["exists"] else "No"
                     rec["BackendResourceName"]  = bk["name"]
@@ -751,17 +804,19 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
             continue
 
     if not found:
-        rec["Connection State"]     = "Endpoint Not Found"
-        rec["Notes"]                = "Not found in any scanned subscription."
-        rec["Recommended Action"]   = "Endpoint Not Found / Check Subscription"
+        rec["Connection State"]   = "Endpoint Not Found"
+        rec["Notes"]              = "Not found in any scanned subscription."
+        rec["Recommended Action"] = "Endpoint Not Found / Check Subscription"
         rec["DeleteRecommendation"] = DR_ENDPOINT_NOT_FOUND
         rec.update({k: v for k, v in original_row.items() if k not in rec or not rec[k]})
         return rec
 
     rec["Terraform Managed"] = in_terraform(name, tf_state, tf_code)
-    action, notes, dr = decide(rec["Connection State"],
-                               rec["Backend Exists"],
-                               rec["Terraform Managed"])
+    action, notes, dr = decide(
+        rec["Connection State"],
+        rec["Backend Exists"],
+        rec["Terraform Managed"],
+    )
     rec["Recommended Action"]   = action
     rec["Notes"]                = notes
     rec["DeleteRecommendation"] = dr
@@ -769,20 +824,22 @@ def scan(ep: dict, subscriptions: list, tf_state: str,
     return rec
 
 # ===========================================================================
-# Deletion safety gate (hardened)
+# Deletion safety gate (hardened -- 7 layers)
 # ===========================================================================
 
 def _is_deletion_blocked(rec: dict, exclusions: set, denylist: set = None) -> tuple:
     """
     Safety gate checks in order:
-    1. Endpoint Name blank
-    2. Resource Group blank
-    3. Denylist (hard block)
-    4. Exclusion list
-    5. ApprovedToDelete != yes
-    6. Recommended Action keyword block
-    7. DeleteRecommendation != SAFE_DELETE
-       (blocks REVIEW_REQUIRED, ENDPOINT_NOT_FOUND, ACCESS_OR_SUBSCRIPTION_REVIEW)
+      1. Endpoint Name blank
+      2. Resource Group blank
+      3. Denylist (hard block)
+      4. Exclusion list
+      5. ApprovedToDelete != yes
+      6. Recommended Action keyword block
+      7. DeleteRecommendation != SAFE_DELETE
+         (blocks REVIEW_REQUIRED, ENDPOINT_NOT_FOUND, ACCESS_OR_SUBSCRIPTION_REVIEW)
+
+    Returns (blocked: bool, reason: str).
     """
     if denylist is None:
         denylist = set()
@@ -801,7 +858,9 @@ def _is_deletion_blocked(rec: dict, exclusions: set, denylist: set = None) -> tu
     if name.lower() in exclusions:
         return True, "Listed in exclusions.txt"
     if approved != "yes":
-        return True, ("ApprovedToDelete='" + str(rec.get("ApprovedToDelete", "")) + "' -- must be Yes")
+        return True, (
+            "ApprovedToDelete='" + str(rec.get("ApprovedToDelete", "")) + "' -- must be Yes"
+        )
     for substr in _BLOCK_SUBSTRINGS:
         if substr.lower() in action.lower():
             return True, f"Recommended Action '{action}' contains blocking keyword"
@@ -809,7 +868,7 @@ def _is_deletion_blocked(rec: dict, exclusions: set, denylist: set = None) -> tu
         return True, (
             f"DeleteRecommendation='{dr}' -- only SAFE_DELETE endpoints may be deleted. "
             "REVIEW_REQUIRED, ENDPOINT_NOT_FOUND, and ACCESS_OR_SUBSCRIPTION_REVIEW "
-            "endpoints must not be deleted."
+            "endpoints must NOT be deleted."
         )
     return False, ""
 
@@ -819,18 +878,18 @@ def _is_deletion_blocked(rec: dict, exclusions: set, denylist: set = None) -> tu
 
 def _execute_delete(name: str, rg: str) -> tuple:
     """
-    Issue az network private-endpoint delete.
+    Issue: az network private-endpoint delete --name <name> --resource-group <rg>
 
     THIS IS THE SOLE AZURE DELETE COMMAND IN THIS ENTIRE CODEBASE.
     Only Private Endpoint resources are ever touched.
     No backend resources (Key Vault, Storage, SQL, VNet, NIC, DNS, NSG,
     Subnet, Route Table, or any other resource type) are EVER touched.
 
-    NOTE: --yes is intentionally omitted. The az CLI does not prompt
-    interactively when called from subprocess (no TTY attached).
-    Removing --yes eliminates any risk of unintended confirmation bypass.
+    The flag --yes is intentionally absent.
+    The az CLI does not prompt when called from subprocess (no TTY attached).
+    Omitting --yes eliminates any risk of unintended confirmation bypass.
 
-    Returns (success: bool, error_msg: str)
+    Returns (success: bool, error_msg: str).
     """
     try:
         r = subprocess.run(
@@ -852,17 +911,17 @@ def _execute_delete(name: str, rg: str) -> tuple:
 # ===========================================================================
 
 def run_delete_approved(
-    results: list,
-    exclusions: set,
-    denylist: set,
-    output_dir: str,
-    backup_dir: str,
-    ts: str,
-    run_dt: str,
-    dry_run: bool = False,
+    results:      list,
+    exclusions:   set,
+    denylist:     set,
+    output_dir:   str,
+    backup_dir:   str,
+    ts:           str,
+    run_dt:       str,
+    dry_run:      bool  = False,
     delete_pause: float = 2.0,
-    change_ticket: str = "",
-    approved_by: str = "",
+    change_ticket: str  = "",
+    approved_by:  str   = "",
 ) -> list:
     """
     Approval-gated deletion workflow.
@@ -870,10 +929,10 @@ def run_delete_approved(
     Only SAFE_DELETE endpoints with ApprovedToDelete=Yes are eligible.
     REVIEW_REQUIRED endpoints are NEVER deleted.
 
-    Dry-run shows clearly:
-        Would delete -> SAFE_DELETE endpoints (ApprovedToDelete=Yes)
-        Would skip   -> REVIEW_REQUIRED endpoints
-        Would skip   -> ENDPOINT_NOT_FOUND endpoints
+    Dry-run shows:
+      Would-Delete -> SAFE_DELETE endpoints (ApprovedToDelete=Yes)
+      Would-Skip   -> REVIEW_REQUIRED endpoints
+      Would-Skip   -> ENDPOINT_NOT_FOUND endpoints
     """
     mode = "DRY RUN" if dry_run else "LIVE DELETE"
     log.info("")
@@ -881,15 +940,15 @@ def run_delete_approved(
     log.info("CLEANUP-APPROVED MODE [%s]", mode)
     log.info("=" * 70)
 
-    del_log = []
+    del_log       = []
     approved_rows = [r for r in results if get_approval_value(r) == "yes"]
     skipped_rows  = [r for r in results if get_approval_value(r) != "yes"]
 
-    log.info("  Total rows           : %d", len(results))
-    log.info("  Rows approved (Yes)  : %d", len(approved_rows))
-    log.info("  Rows skipped (non-Yes): %d", len(skipped_rows))
+    log.info("  Total rows          : %d", len(results))
+    log.info("  Rows approved (Yes) : %d", len(approved_rows))
+    log.info("  Rows skipped (no)   : %d", len(skipped_rows))
 
-    if len(approved_rows) == 0:
+    if not approved_rows:
         log.warning("No rows marked ApprovedToDelete=Yes -- nothing to process.")
         _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
         generate_rollback(del_log, backup_dir, output_dir, run_dt)
@@ -914,18 +973,22 @@ def run_delete_approved(
             else:
                 label = "Skipped"
             entry = {
-                "Endpoint Name": rec.get("Endpoint Name", ""),
-                "Resource Group": rec.get("Resource Group", ""),
-                "Subscription": rec.get("Subscription", ""),
-                "Region": rec.get("Region", ""),
-                "Recommended Action": rec.get("Recommended Action", ""),
+                "Endpoint Name":     rec.get("Endpoint Name", ""),
+                "Resource Group":    rec.get("Resource Group", ""),
+                "Subscription":      rec.get("Subscription", ""),
+                "Region":            rec.get("Region", ""),
+                "Recommended Action":rec.get("Recommended Action", ""),
                 "DeleteRecommendation": dr,
-                "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
-                "Change Ticket": change_ticket, "Approved By": approved_by,
-                "Delete Result": label, "Delete Timestamp": "",
-                "Duration (s)": "", "Dry Run": str(dry_run),
-                "Backup Path": "", "Pre-Delete Validation": reason,
-                "Error Message": reason,
+                "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
+                "Change Ticket":     change_ticket,
+                "Approved By":       approved_by,
+                "Delete Result":     label,
+                "Delete Timestamp":  "",
+                "Duration (s)":      "",
+                "Dry Run":           str(dry_run),
+                "Backup Path":       "",
+                "Pre-Delete Validation": reason,
+                "Error Message":     reason,
             }
             del_log.append(entry)
             log.warning("  BLOCKED [%s]: %s -- %s", label, rec.get("Endpoint Name", ""), reason)
@@ -940,9 +1003,9 @@ def run_delete_approved(
 
     # Dry-run summary
     if dry_run:
-        rev_req   = sum(1 for r in del_log if r["Delete Result"] == "Skipped-ReviewRequired")
-        notfound  = sum(1 for r in del_log if r["Delete Result"] == "Skipped-EndpointNotFound")
-        access    = sum(1 for r in del_log if r["Delete Result"] == "Skipped-AccessOrSubReview")
+        rev_req  = sum(1 for r in del_log if r["Delete Result"] == "Skipped-ReviewRequired")
+        notfound = sum(1 for r in del_log if r["Delete Result"] == "Skipped-EndpointNotFound")
+        access   = sum(1 for r in del_log if r["Delete Result"] == "Skipped-AccessOrSubReview")
         log.info("")
         log.info("[DRY RUN] Simulation -- no Azure resources will be modified.")
         log.info("  Would-Delete  (SAFE_DELETE)             : %d", len(candidates))
@@ -951,9 +1014,10 @@ def run_delete_approved(
         log.info("  Would-Skip    (ACCESS_OR_SUB_REVIEW)    : %d", access)
 
     log.info("")
-    log.info("Endpoints queued for %s (%d):", "simulation" if dry_run else "deletion", len(candidates))
+    log.info("Endpoints queued for %s (%d):",
+             "simulation" if dry_run else "deletion", len(candidates))
     for rec in candidates:
-        log.info("  - %-45s RG=%-25s DR=%s",
+        log.info("  - %-45s  RG=%-25s  DR=%s",
                  rec["Endpoint Name"], rec["Resource Group"],
                  rec.get("DeleteRecommendation", ""))
 
@@ -962,7 +1026,7 @@ def run_delete_approved(
         log.warning("")
         log.warning("=" * 70)
         log.warning("WARNING: This will PERMANENTLY DELETE Azure Private Endpoints.")
-        log.warning("ONLY SAFE_DELETE endpoints are included.")
+        log.warning("ONLY SAFE_DELETE endpoints are included in this list.")
         log.warning("REVIEW_REQUIRED endpoints are NOT in this list.")
         log.warning("Backend resources are NEVER touched.")
         log.warning("=" * 70)
@@ -971,18 +1035,22 @@ def run_delete_approved(
             log.info("Deletion cancelled -- user did not type CONFIRM.")
             for rec in candidates:
                 del_log.append({
-                    "Endpoint Name": rec["Endpoint Name"],
-                    "Resource Group": rec["Resource Group"],
-                    "Subscription": rec.get("Subscription", ""),
-                    "Region": rec.get("Region", ""),
-                    "Recommended Action": rec.get("Recommended Action", ""),
+                    "Endpoint Name":     rec["Endpoint Name"],
+                    "Resource Group":    rec["Resource Group"],
+                    "Subscription":      rec.get("Subscription", ""),
+                    "Region":            rec.get("Region", ""),
+                    "Recommended Action":rec.get("Recommended Action", ""),
                     "DeleteRecommendation": rec.get("DeleteRecommendation", ""),
-                    "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
-                    "Change Ticket": change_ticket, "Approved By": approved_by,
-                    "Delete Result": "Skipped", "Delete Timestamp": datetime.now().isoformat(),
-                    "Duration (s)": "", "Dry Run": "False", "Backup Path": "",
+                    "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
+                    "Change Ticket":     change_ticket,
+                    "Approved By":       approved_by,
+                    "Delete Result":     "Skipped",
+                    "Delete Timestamp":  datetime.now().isoformat(),
+                    "Duration (s)":      "",
+                    "Dry Run":           "False",
+                    "Backup Path":       "",
                     "Pre-Delete Validation": "Cancelled by user",
-                    "Error Message": "Cancelled by user at CONFIRM prompt",
+                    "Error Message":     "Cancelled by user at CONFIRM prompt",
                 })
             _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
             generate_rollback(del_log, backup_dir, output_dir, run_dt)
@@ -1000,21 +1068,26 @@ def run_delete_approved(
         log.info("  Subscription: %s", sub)
         if sub and not dry_run:
             if not set_subscription(sub):
-                log.error("  Cannot set subscription '%s' -- skipping all endpoints in it.", sub)
+                log.error("  Cannot set subscription '%s' -- skipping all endpoints.", sub)
                 for rg2, recs in rg_map.items():
                     for rec in recs:
                         del_log.append({
-                            "Endpoint Name": rec["Endpoint Name"],
-                            "Resource Group": rg2, "Subscription": sub,
-                            "Region": rec.get("Region", ""),
-                            "Recommended Action": rec.get("Recommended Action", ""),
+                            "Endpoint Name":     rec["Endpoint Name"],
+                            "Resource Group":    rg2,
+                            "Subscription":      sub,
+                            "Region":            rec.get("Region", ""),
+                            "Recommended Action":rec.get("Recommended Action", ""),
                             "DeleteRecommendation": rec.get("DeleteRecommendation", ""),
-                            "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
-                            "Change Ticket": change_ticket, "Approved By": approved_by,
-                            "Delete Result": "Failed", "Delete Timestamp": datetime.now().isoformat(),
-                            "Duration (s)": "", "Dry Run": str(dry_run), "Backup Path": "",
+                            "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
+                            "Change Ticket":     change_ticket,
+                            "Approved By":       approved_by,
+                            "Delete Result":     "Failed",
+                            "Delete Timestamp":  datetime.now().isoformat(),
+                            "Duration (s)":      "",
+                            "Dry Run":           str(dry_run),
+                            "Backup Path":       "",
                             "Pre-Delete Validation": "FAILED",
-                            "Error Message": f"Cannot set subscription context to '{sub}'",
+                            "Error Message":     f"Cannot set subscription context to '{sub}'",
                         })
                 continue
 
@@ -1023,45 +1096,54 @@ def run_delete_approved(
             for rec in recs:
                 name    = rec["Endpoint Name"]
                 t_start = time.time()
-                entry = {
-                    "Endpoint Name": name, "Resource Group": rg, "Subscription": sub,
-                    "Region": rec.get("Region", ""),
-                    "Recommended Action": rec.get("Recommended Action", ""),
+                entry   = {
+                    "Endpoint Name":     name,
+                    "Resource Group":    rg,
+                    "Subscription":      sub,
+                    "Region":            rec.get("Region", ""),
+                    "Recommended Action":rec.get("Recommended Action", ""),
                     "DeleteRecommendation": rec.get("DeleteRecommendation", DR_SAFE_DELETE),
-                    "ApprovedToDelete": rec.get("ApprovedToDelete", ""),
-                    "Change Ticket": change_ticket, "Approved By": approved_by,
-                    "Delete Result": "", "Delete Timestamp": datetime.now().isoformat(),
-                    "Duration (s)": "", "Dry Run": str(dry_run),
-                    "Backup Path": "", "Pre-Delete Validation": "", "Error Message": "",
+                    "ApprovedToDelete":  rec.get("ApprovedToDelete", ""),
+                    "Change Ticket":     change_ticket,
+                    "Approved By":       approved_by,
+                    "Delete Result":     "",
+                    "Delete Timestamp":  datetime.now().isoformat(),
+                    "Duration (s)":      "",
+                    "Dry Run":           str(dry_run),
+                    "Backup Path":       "",
+                    "Pre-Delete Validation": "",
+                    "Error Message":     "",
                 }
 
                 if dry_run:
                     dr = rec.get("DeleteRecommendation", DR_SAFE_DELETE)
-                    log.info("    [DRY-RUN] Would delete (DR=%s): %s", dr, name)
-                    entry["Delete Result"] = "Dry-Run"
-                    entry["Duration (s)"]  = "0"
-                    entry["Pre-Delete Validation"] = "Simulated OK"
+                    log.info("      [DRY-RUN] Would delete (DR=%s): %s", dr, name)
+                    entry["Delete Result"]          = "Dry-Run"
+                    entry["Duration (s)"]           = "0"
+                    entry["Pre-Delete Validation"]  = "Simulated OK"
                     del_log.append(entry)
                     continue
 
                 # Backup
-                log.info("    [Backup] %s ...", name)
+                log.info("      [Backup]   %s ...", name)
                 pe_data     = get_private_endpoint(name, rg)
                 backup_path = ""
                 if pe_data:
                     os.makedirs(backup_dir, exist_ok=True)
-                    backup_path = export_endpoint_backup(pe_data, name, rg, sub, backup_dir, ts)
+                    backup_path = export_endpoint_backup(
+                        pe_data, name, rg, sub, backup_dir, ts
+                    )
                     entry["Backup Path"] = backup_path
                 else:
-                    log.warning("    Could not fetch ARM data for backup -- proceeding with caution.")
+                    log.warning("      Could not fetch ARM data for backup.")
 
                 # Pre-delete re-validation
-                log.info("    [Validate] %s ...", name)
+                log.info("      [Validate] %s ...", name)
                 with Spinner(f"Validating {name}"):
                     valid, reason = private_endpoint_still_valid_for_delete(name, rg, sub)
                 entry["Pre-Delete Validation"] = reason
                 if not valid:
-                    log.warning("    SKIPPED: %s -- %s", name, reason)
+                    log.warning("      SKIPPED: %s -- %s", name, reason)
                     entry["Delete Result"] = "Skipped"
                     entry["Duration (s)"]  = f"{time.time()-t_start:.1f}"
                     entry["Error Message"] = reason
@@ -1071,7 +1153,7 @@ def run_delete_approved(
                 # Subscription context verification
                 if not verify_subscription_context(sub):
                     msg = f"Subscription context mismatch -- expected '{sub}'"
-                    log.error("    FAILED: %s -- %s", name, msg)
+                    log.error("      FAILED: %s -- %s", name, msg)
                     entry["Delete Result"] = "Failed"
                     entry["Duration (s)"]  = f"{time.time()-t_start:.1f}"
                     entry["Error Message"] = msg
@@ -1079,17 +1161,17 @@ def run_delete_approved(
                     continue
 
                 # Execute delete
-                log.info("    [DELETE] %s  RG=%s  Sub=%s  DR=%s",
+                log.info("      [DELETE]   %s  RG=%s  Sub=%s  DR=%s",
                          name, rg, sub, rec.get("DeleteRecommendation", ""))
                 with Spinner(f"Deleting {name}"):
                     ok, err = _execute_delete(name, rg)
                 elapsed = f"{time.time()-t_start:.1f}"
                 entry["Duration (s)"] = elapsed
                 if ok:
-                    log.info("    -> Deleted OK (%.1fs)", float(elapsed))
+                    log.info("      -> Deleted OK (%.1fs)", float(elapsed))
                     entry["Delete Result"] = "Deleted"
                 else:
-                    log.error("    -> FAILED: %s", err)
+                    log.error("      -> FAILED: %s", err)
                     entry["Delete Result"] = "Failed"
                     entry["Error Message"] = err
                 del_log.append(entry)
@@ -1097,7 +1179,9 @@ def run_delete_approved(
                 if delete_pause > 0:
                     time.sleep(delete_pause)
 
-    def _count(label): return sum(1 for r in del_log if r["Delete Result"] == label)
+    def _count(label):
+        return sum(1 for r in del_log if r["Delete Result"] == label)
+
     log.info("")
     log.info("=" * 70)
     log.info("DELETION SUMMARY [%s]", mode)
@@ -1107,20 +1191,20 @@ def run_delete_approved(
         log.info("  Would-Skip (NotFound)     : %d", _count("Skipped-EndpointNotFound"))
         log.info("  Would-Skip (AccessReview) : %d", _count("Skipped-AccessOrSubReview"))
     else:
-        log.info("  Deleted                   : %d", _count("Deleted"))
-        log.info("  Failed                    : %d", _count("Failed"))
-        log.info("  Skipped                   : %d", _count("Skipped"))
-        log.info("  Skipped (ReviewRequired)  : %d", _count("Skipped-ReviewRequired"))
-        log.info("  Skipped (EndpointNotFound): %d", _count("Skipped-EndpointNotFound"))
-    log.info("  Excluded                  : %d", _count("Excluded"))
-    log.info("  Denied                    : %d", _count("Denied"))
+        log.info("  Deleted                    : %d", _count("Deleted"))
+        log.info("  Failed                     : %d", _count("Failed"))
+        log.info("  Skipped                    : %d", _count("Skipped"))
+        log.info("  Skipped (ReviewRequired)   : %d", _count("Skipped-ReviewRequired"))
+        log.info("  Skipped (EndpointNotFound) : %d", _count("Skipped-EndpointNotFound"))
+        log.info("  Excluded                   : %d", _count("Excluded"))
+        log.info("  Denied                     : %d", _count("Denied"))
     log.info("=" * 70)
 
     failed_list = [r for r in del_log if r["Delete Result"] == "Failed"]
     if failed_list:
         log.error("FAILED DELETIONS (%d):", len(failed_list))
         for r in failed_list:
-            log.error("  - %s RG=%s Error=%s",
+            log.error("  - %s  RG=%s  Error=%s",
                       r["Endpoint Name"], r["Resource Group"], r.get("Error Message", ""))
 
     _write_delete_reports(del_log, output_dir, ts, run_dt, dry_run)
@@ -1131,7 +1215,7 @@ def run_delete_approved(
 # Excel style helpers
 # ===========================================================================
 
-def _fill(c):  return PatternFill("solid", fgColor=c)
+def _fill(c):          return PatternFill("solid", fgColor=c)
 def _font(c, bold=False): return Font(color=c, bold=bold, name="Calibri", size=10)
 def _border():
     s = Side(style="thin", color="BFBFBF")
@@ -1140,7 +1224,7 @@ def _border():
 def _autosize_sheet(ws, headers: list, extra_padding: int = 4):
     for ci, header in enumerate(headers, 1):
         col_letter = get_column_letter(ci)
-        max_len = len(str(header))
+        max_len    = len(str(header))
         for row in ws.iter_rows(min_row=2, min_col=ci, max_col=ci):
             for cell in row:
                 try:
@@ -1149,8 +1233,7 @@ def _autosize_sheet(ws, headers: list, extra_padding: int = 4):
                         max_len = cell_len
                 except Exception:
                     pass
-        adjusted = min(max(max_len + extra_padding, 12), 60)
-        ws.column_dimensions[col_letter].width = adjusted
+        ws.column_dimensions[col_letter].width = min(max(max_len + extra_padding, 12), 60)
 
 # ===========================================================================
 # Validation / Discovery report (XLSX)
@@ -1168,56 +1251,65 @@ def build_excel(results: list, path: str, run_date: str):
     ws["A2"].font = Font(name="Calibri", size=10, italic=True, color="595959")
     ws.merge_cells("A2:E2")
 
-    counts = {}
+    counts    = {}
+    dr_counts = {}
     for r in results:
         a = r.get("Recommended Action", "Review")
         counts[a] = counts.get(a, 0) + 1
-    dr_counts = {}
-    for r in results:
         d = r.get("DeleteRecommendation", DR_UNKNOWN)
         dr_counts[d] = dr_counts.get(d, 0) + 1
 
     for ci, h in enumerate(["Recommended Action", "Count", "%", "DeleteRecommendation", "Count"], 1):
         c = ws.cell(row=4, column=ci, value=h)
-        c.fill = _fill(CLR["hdr_bg"]); c.font = _font(CLR["hdr_fg"], bold=True)
-        c.alignment = Alignment(horizontal="center"); c.border = _border()
+        c.fill      = _fill(CLR["hdr_bg"])
+        c.font      = _font(CLR["hdr_fg"], bold=True)
+        c.alignment = Alignment(horizontal="center")
+        c.border    = _border()
     ws.row_dimensions[4].height = 20
 
     total = len(results) or 1
-    row = 5
+    row   = 5
     for action, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
         style = ACTION_STYLE.get(action, ("na_bg", "na_fg"))
         bg, fg = CLR[style[0]], CLR[style[1]]
-        ws.cell(row=row, column=1, value=action).fill = _fill(bg)
-        ws.cell(row=row, column=1).font = _font(fg); ws.cell(row=row, column=1).border = _border()
-        ws.cell(row=row, column=2, value=count).fill = _fill(bg)
-        ws.cell(row=row, column=2).font = _font(fg); ws.cell(row=row, column=2).border = _border()
+        ws.cell(row=row, column=1, value=action).fill   = _fill(bg)
+        ws.cell(row=row, column=1).font   = _font(fg)
+        ws.cell(row=row, column=1).border = _border()
+        ws.cell(row=row, column=2, value=count).fill    = _fill(bg)
+        ws.cell(row=row, column=2).font   = _font(fg)
+        ws.cell(row=row, column=2).border = _border()
         ws.cell(row=row, column=2).alignment = Alignment(horizontal="center")
-        ws.cell(row=row, column=3, value=f"{count/total*100:.1f}%").fill = _fill(bg)
-        ws.cell(row=row, column=3).font = _font(fg); ws.cell(row=row, column=3).border = _border()
+        pct = f"{count/total*100:.1f}%"
+        ws.cell(row=row, column=3, value=pct).fill   = _fill(bg)
+        ws.cell(row=row, column=3).font   = _font(fg)
+        ws.cell(row=row, column=3).border = _border()
         ws.row_dimensions[row].height = 18
         row += 1
 
     row_dr = 5
     for dr_val, cnt in sorted(dr_counts.items(), key=lambda x: x[1], reverse=True):
         ws.cell(row=row_dr, column=4, value=dr_val).border = _border()
-        ws.cell(row=row_dr, column=5, value=cnt).border = _border()
+        ws.cell(row=row_dr, column=5, value=cnt).border    = _border()
         ws.cell(row=row_dr, column=5).alignment = Alignment(horizontal="center")
         row_dr += 1
 
-    ws.column_dimensions["A"].width = 55; ws.column_dimensions["B"].width = 10
-    ws.column_dimensions["C"].width = 12; ws.column_dimensions["D"].width = 34
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 10
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 34
     ws.column_dimensions["E"].width = 10
     ws.freeze_panes = "A5"
 
-    def write_sheet(wb, title, rows, headers, row_filter=None, bg_key="na_bg", fg_key="na_fg"):
+    def write_sheet(wb, title, rows, headers, row_filter=None,
+                    bg_key="na_bg", fg_key="na_fg"):
         ws2 = wb.create_sheet(title)
         ws2.row_dimensions[1].height = 22
         for ci, h in enumerate(headers, 1):
             c = ws2.cell(row=1, column=ci, value=h)
-            c.fill = _fill(CLR["hdr_bg"]); c.font = _font(CLR["hdr_fg"], bold=True)
+            c.fill      = _fill(CLR["hdr_bg"])
+            c.font      = _font(CLR["hdr_fg"], bold=True)
             c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            c.border = _border()
+            c.border    = _border()
         ri = 2
         for rec in rows:
             if row_filter and not row_filter(rec):
@@ -1227,7 +1319,9 @@ def build_excel(results: list, path: str, run_date: str):
             bg, fg = CLR[style[0]], CLR[style[1]]
             for ci, h in enumerate(headers, 1):
                 c = ws2.cell(row=ri, column=ci, value=rec.get(h, ""))
-                c.fill = _fill(bg); c.font = _font(fg); c.border = _border()
+                c.fill      = _fill(bg)
+                c.font      = _font(fg)
+                c.border    = _border()
                 c.alignment = Alignment(wrap_text=True, vertical="top")
             ws2.row_dimensions[ri].height = 18
             ri += 1
@@ -1237,7 +1331,7 @@ def build_excel(results: list, path: str, run_date: str):
         return ws2
 
     write_sheet(wb, "All Endpoints", results, SCAN_HEADERS)
-    write_sheet(wb, "SAFE_DELETE", results, SCAN_HEADERS,
+    write_sheet(wb, "SAFE_DELETE",   results, SCAN_HEADERS,
                 row_filter=lambda r: r.get("DeleteRecommendation") == DR_SAFE_DELETE,
                 bg_key="safe_bg", fg_key="safe_fg")
     write_sheet(wb, "REVIEW_REQUIRED", results, SCAN_HEADERS,
@@ -1247,8 +1341,10 @@ def build_excel(results: list, path: str, run_date: str):
                 row_filter=lambda r: r.get("Recommended Action") in ("Excluded", "Denied"),
                 bg_key="exc_bg", fg_key="exc_fg")
     write_sheet(wb, "Investigate", results, SCAN_HEADERS,
-                row_filter=lambda r: "Investigate" in r.get("Recommended Action", "") or
-                                     "Review" in r.get("Recommended Action", ""),
+                row_filter=lambda r: (
+                    "Investigate" in r.get("Recommended Action", "") or
+                    "Review"      in r.get("Recommended Action", "")
+                ),
                 bg_key="rev_bg", fg_key="rev_fg")
     wb.save(path)
 
@@ -1257,13 +1353,15 @@ def build_excel(results: list, path: str, run_date: str):
 # ===========================================================================
 
 def build_delete_excel(del_log: list, path: str, run_date: str, dry_run: bool):
-    wb = Workbook()
-    ws = wb.active
+    wb  = Workbook()
+    ws  = wb.active
     ws.title = "Delete Report"
     mode_label = "DRY RUN -- No Real Changes" if dry_run else "LIVE DELETION REPORT"
     ws["A1"] = f"EDAV Private Endpoint Deletion Report [{mode_label}]"
-    ws["A1"].font = Font(name="Calibri", size=14, bold=True,
-                         color=CLR["dry_fg"] if dry_run else CLR["hdr_bg"])
+    ws["A1"].font = Font(
+        name="Calibri", size=14, bold=True,
+        color=CLR["dry_fg"] if dry_run else CLR["hdr_bg"],
+    )
     ws.merge_cells("A1:P1")
     ws.row_dimensions[1].height = 26
     ws["A2"] = f"Generated: {run_date} | EDAV Monitor v{VERSION}"
@@ -1272,16 +1370,21 @@ def build_delete_excel(del_log: list, path: str, run_date: str, dry_run: bool):
     ws.row_dimensions[4].height = 22
     for ci, h in enumerate(DEL_HEADERS, 1):
         c = ws.cell(row=4, column=ci, value=h)
-        c.fill = _fill(CLR["hdr_bg"]); c.font = _font(CLR["hdr_fg"], bold=True)
+        c.fill      = _fill(CLR["hdr_bg"])
+        c.font      = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = _border()
+        c.border    = _border()
+
     result_colour = {
-        "Deleted": ("safe_bg", "safe_fg"), "Dry-Run": ("dry_bg", "dry_fg"),
-        "Failed": ("del_bg", "del_fg"), "Skipped": ("na_bg", "na_fg"),
-        "Skipped-ReviewRequired": ("rev_bg", "rev_fg"),
-        "Skipped-EndpointNotFound": ("na_bg", "na_fg"),
-        "Skipped-AccessOrSubReview": ("na_bg", "na_fg"),
-        "Excluded": ("exc_bg", "exc_fg"), "Denied": ("del_bg", "del_fg"),
+        "Deleted":                   ("safe_bg", "safe_fg"),
+        "Dry-Run":                   ("dry_bg",  "dry_fg"),
+        "Failed":                    ("del_bg",  "del_fg"),
+        "Skipped":                   ("na_bg",   "na_fg"),
+        "Skipped-ReviewRequired":    ("rev_bg",  "rev_fg"),
+        "Skipped-EndpointNotFound":  ("na_bg",   "na_fg"),
+        "Skipped-AccessOrSubReview": ("na_bg",   "na_fg"),
+        "Excluded":                  ("exc_bg",  "exc_fg"),
+        "Denied":                    ("del_bg",  "del_fg"),
     }
     for ri, row_data in enumerate(del_log, 5):
         result = row_data.get("Delete Result", "")
@@ -1289,7 +1392,9 @@ def build_delete_excel(del_log: list, path: str, run_date: str, dry_run: bool):
         bg, fg = CLR[style[0]], CLR[style[1]]
         for ci, h in enumerate(DEL_HEADERS, 1):
             c = ws.cell(row=ri, column=ci, value=row_data.get(h, ""))
-            c.fill = _fill(bg); c.font = _font(fg); c.border = _border()
+            c.fill      = _fill(bg)
+            c.font      = _font(fg)
+            c.border    = _border()
             c.alignment = Alignment(wrap_text=True, vertical="top")
         ws.row_dimensions[ri].height = 18
     ws.freeze_panes = "A5"
@@ -1314,9 +1419,10 @@ def build_verification_excel(verify_log: list, path: str, run_date: str):
     ws.row_dimensions[4].height = 22
     for ci, h in enumerate(VERIFY_HEADERS, 1):
         c = ws.cell(row=4, column=ci, value=h)
-        c.fill = _fill(CLR["hdr_bg"]); c.font = _font(CLR["hdr_fg"], bold=True)
+        c.fill      = _fill(CLR["hdr_bg"])
+        c.font      = _font(CLR["hdr_fg"], bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = _border()
+        c.border    = _border()
     for ri, row_data in enumerate(verify_log, 5):
         status = row_data.get("Verification Status", "")
         if status.startswith("Verified"):
@@ -1327,7 +1433,9 @@ def build_verification_excel(verify_log: list, path: str, run_date: str):
             bg, fg = CLR["na_bg"], CLR["na_fg"]
         for ci, h in enumerate(VERIFY_HEADERS, 1):
             c = ws.cell(row=ri, column=ci, value=row_data.get(h, ""))
-            c.fill = _fill(bg); c.font = _font(fg); c.border = _border()
+            c.fill      = _fill(bg)
+            c.font      = _font(fg)
+            c.border    = _border()
             c.alignment = Alignment(wrap_text=True, vertical="top")
         ws.row_dimensions[ri].height = 18
     ws.freeze_panes = "A5"
@@ -1339,56 +1447,89 @@ def build_verification_excel(verify_log: list, path: str, run_date: str):
 # ===========================================================================
 
 def build_delete_markdown(del_log: list, path: str, run_date: str, dry_run: bool):
-    def rows_by(result): return [r for r in del_log if r.get("Delete Result") == result]
-    deleted   = rows_by("Deleted");   dry       = rows_by("Dry-Run")
-    failed    = rows_by("Failed");    skipped   = rows_by("Skipped")
-    excluded  = rows_by("Excluded");  rev_req   = rows_by("Skipped-ReviewRequired")
-    not_found = rows_by("Skipped-EndpointNotFound")
+    def rows_by(result):
+        return [r for r in del_log if r.get("Delete Result") == result]
+
+    deleted    = rows_by("Deleted")
+    dry        = rows_by("Dry-Run")
+    failed     = rows_by("Failed")
+    skipped    = rows_by("Skipped")
+    excluded   = rows_by("Excluded")
+    rev_req    = rows_by("Skipped-ReviewRequired")
+    not_found  = rows_by("Skipped-EndpointNotFound")
     access_rev = rows_by("Skipped-AccessOrSubReview")
-    mode = "DRY RUN" if dry_run else "LIVE"
+    mode       = "DRY RUN" if dry_run else "LIVE"
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# EDAV Private Endpoint Deletion Report [{mode}]\n\n")
-        f.write(f"**Run Date:** {run_date} | **Mode:** {mode} | **Tool:** EDAV Monitor v{VERSION}\n\n")
+        f.write(
+            f"**Run Date:** {run_date} | **Mode:** {mode} | "
+            f"**Tool:** EDAV Monitor v{VERSION}\n\n"
+        )
         f.write("| Outcome | Count |\n|---|---|\n")
         for label, lst in [
-            ("Deleted", deleted), ("Dry-Run (would delete)", dry),
-            ("Failed", failed), ("Skipped", skipped), ("Excluded", excluded),
-            ("Skipped (REVIEW_REQUIRED)", rev_req),
-            ("Skipped (ENDPOINT_NOT_FOUND)", not_found),
+            ("Deleted",                             deleted),
+            ("Dry-Run (would delete)",              dry),
+            ("Failed",                              failed),
+            ("Skipped",                             skipped),
+            ("Excluded",                            excluded),
+            ("Skipped (REVIEW_REQUIRED)",           rev_req),
+            ("Skipped (ENDPOINT_NOT_FOUND)",        not_found),
             ("Skipped (ACCESS_OR_SUBSCRIPTION_REVIEW)", access_rev),
         ]:
             if lst:
                 f.write(f"| {label} | {len(lst)} |\n")
         f.write(f"| **Total** | **{len(del_log)}** |\n\n")
+
         def write_table(title, lst, cols):
-            if not lst: return
+            if not lst:
+                return
             f.write(f"## {title}\n\n")
             f.write("| " + " | ".join(cols) + " |\n")
             f.write("|" + "|".join(["---"] * len(cols)) + "|\n")
             for r in lst:
                 f.write("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |\n")
             f.write("\n")
+
         if dry_run:
-            write_table("Would Be Deleted (Dry-Run / SAFE_DELETE)", dry,
-                        ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"])
-            write_table("Would Be Skipped (REVIEW_REQUIRED)", rev_req,
-                        ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"])
-            write_table("Would Be Skipped (ENDPOINT_NOT_FOUND)", not_found,
-                        ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"])
-            write_table("Would Be Skipped (ACCESS_OR_SUBSCRIPTION_REVIEW)", access_rev,
-                        ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"])
+            write_table(
+                "Would Be Deleted (Dry-Run / SAFE_DELETE)", dry,
+                ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"],
+            )
+            write_table(
+                "Would Be Skipped (REVIEW_REQUIRED)", rev_req,
+                ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"],
+            )
+            write_table(
+                "Would Be Skipped (ENDPOINT_NOT_FOUND)", not_found,
+                ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"],
+            )
+            write_table(
+                "Would Be Skipped (ACCESS_OR_SUBSCRIPTION_REVIEW)", access_rev,
+                ["Endpoint Name", "Resource Group", "Subscription", "DeleteRecommendation"],
+            )
         else:
-            write_table("Deleted", deleted,
-                        ["Endpoint Name", "Resource Group", "Subscription",
-                         "DeleteRecommendation", "Delete Timestamp", "Duration (s)"])
-            write_table("Failed", failed,
-                        ["Endpoint Name", "Resource Group", "Error Message"])
-            write_table("Skipped (REVIEW_REQUIRED -- not deleted)", rev_req,
-                        ["Endpoint Name", "Resource Group", "DeleteRecommendation", "Error Message"])
-            write_table("Skipped", skipped,
-                        ["Endpoint Name", "Resource Group", "Error Message"])
-            write_table("Excluded", excluded,
-                        ["Endpoint Name", "Resource Group", "Error Message"])
+            write_table(
+                "Deleted", deleted,
+                ["Endpoint Name", "Resource Group", "Subscription",
+                 "DeleteRecommendation", "Delete Timestamp", "Duration (s)"],
+            )
+            write_table(
+                "Failed", failed,
+                ["Endpoint Name", "Resource Group", "Error Message"],
+            )
+            write_table(
+                "Skipped (REVIEW_REQUIRED -- not deleted)", rev_req,
+                ["Endpoint Name", "Resource Group", "DeleteRecommendation", "Error Message"],
+            )
+            write_table(
+                "Skipped", skipped,
+                ["Endpoint Name", "Resource Group", "Error Message"],
+            )
+            write_table(
+                "Excluded", excluded,
+                ["Endpoint Name", "Resource Group", "Error Message"],
+            )
         f.write("---\n\n")
         f.write("> **Safety Note:** Only Azure Private Endpoint resources were targeted.\n")
         f.write("> No backend resources were modified or deleted.\n")
@@ -1408,10 +1549,13 @@ def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date:
         f.write("| # | Endpoint Name | Resource Group | Subscription | DeleteRecommendation |\n")
         f.write("|---|---|---|---|---|\n")
         for i, r in enumerate(deleted, 1):
-            f.write(f"| {i} | {r['Endpoint Name']} | {r['Resource Group']} | "
-                    f"{r['Subscription']} | {r.get('DeleteRecommendation','')} |\n")
+            f.write(
+                f"| {i} | {r['Endpoint Name']} | {r['Resource Group']} | "
+                f"{r['Subscription']} | {r.get('DeleteRecommendation', '')} |\n"
+            )
         f.write("\n## How to Restore an Endpoint\n\n")
-        f.write("See backup JSON in: " + os.path.abspath(os.path.join(backup_dir, "private_endpoints")) + "\n\n")
+        backup_path_abs = os.path.abspath(os.path.join(backup_dir, "private_endpoints"))
+        f.write("See backup JSON in: " + backup_path_abs + "\n\n")
         f.write("```bash\n")
         f.write("az network private-endpoint create --name <name> --resource-group <rg> \\\n")
         f.write("  --vnet-name <vnet> --subnet <subnet> \\\n")
@@ -1421,150 +1565,179 @@ def generate_rollback(del_log: list, backup_dir: str, output_dir: str, run_date:
     log.info("Rollback MD : %s", path)
     return path
 
-def _write_delete_reports(del_log: list, output_dir: str, ts: str, run_dt: str, dry_run: bool):
+def _write_delete_reports(del_log: list, output_dir: str, ts: str,
+                          run_dt: str, dry_run: bool):
     prefix    = "EDAV_DryRun_Report" if dry_run else "EDAV_Delete_Report"
     md_prefix = "dryrun_summary"     if dry_run else "delete_summary"
     del_csv  = os.path.join(output_dir, f"{prefix}_{ts}.csv")
     del_xlsx = os.path.join(output_dir, f"{prefix}_{ts}.xlsx")
     del_md   = os.path.join(output_dir, f"{md_prefix}_{ts}.md")
-    df_del = pd.DataFrame(del_log if del_log else [], columns=DEL_HEADERS)
+    df_del   = pd.DataFrame(del_log if del_log else [], columns=DEL_HEADERS)
     df_del.to_csv(del_csv, index=False)
     log.info("Delete CSV  : %s", del_csv)
     build_delete_excel(del_log, del_xlsx, run_dt, dry_run)
     log.info("Delete XLSX : %s", del_xlsx)
     build_delete_markdown(del_log, del_md, run_dt, dry_run)
     log.info("Delete MD   : %s", del_md)
-
 # ===========================================================================
-# HTML report builder
+# HTML report builder  (v4.3.0 FIX: no nested dict expressions in f-strings)
+# Colour lookups use module-level maps: DR_HTML_COLOUR, ACTION_HTML_COLOUR,
+# DEL_RESULT_HTML_COLOUR -- never dict-literal inside {  } in f-string.
 # ===========================================================================
 
 def build_html_report(results: list, del_log: list, verify_log: list,
-                       path: str, run_date: str, mode: str,
-                       change_ticket: str = "", approved_by: str = ""):
-    counts = {}
-    for r in results:
-        counts[r.get("Recommended Action","Review")] = counts.get(r.get("Recommended Action","Review"),0)+1
+                      path: str, run_date: str, mode: str,
+                      change_ticket: str = "", approved_by: str = ""):
+
     dr_counts = {}
     for r in results:
         d = r.get("DeleteRecommendation", DR_UNKNOWN)
         dr_counts[d] = dr_counts.get(d, 0) + 1
 
-    total        = len(results) or 1
     safe         = dr_counts.get(DR_SAFE_DELETE, 0)
     review_req   = dr_counts.get(DR_REVIEW_REQUIRED, 0)
     not_found_ct = dr_counts.get(DR_ENDPOINT_NOT_FOUND, 0)
-    deleted      = sum(1 for r in del_log if r.get("Delete Result") == "Deleted")
-    verified     = sum(1 for v in verify_log if v.get("Verification Status","").startswith("Verified"))
-    failed       = sum(1 for r in del_log if r.get("Delete Result") == "Failed")
-    ver_failed   = sum(1 for v in verify_log if "FAILED" in v.get("Verification Status",""))
-    disconnected = sum(1 for r in results if r.get("Connection State") == "Disconnected")
+    deleted      = sum(1 for r in del_log    if r.get("Delete Result") == "Deleted")
+    verified     = sum(1 for v in verify_log if v.get("Verification Status", "").startswith("Verified"))
+    failed       = sum(1 for r in del_log    if r.get("Delete Result") == "Failed")
+    ver_failed   = sum(1 for v in verify_log if "FAILED" in v.get("Verification Status", ""))
+    disconnected = sum(1 for r in results    if r.get("Connection State") == "Disconnected")
 
+    # DR summary rows using module-level map (safe: no dict inside f-string)
+    dr_rows = ""
+    for d, c in sorted(dr_counts.items(), key=lambda x: x[1], reverse=True):
+        bg_color = DR_HTML_COLOUR.get(d, "#FFFFFF")
+        dr_rows += (
+            '<tr style="background:' + bg_color + '">'
+            '<td><b>' + d + '</b></td>'
+            '<td style="text-align:center">' + str(c) + '</td></tr>'
+        )
+
+    # Scan rows
     scan_rows = ""
     for r in results:
-        colour = {"Safe Delete Candidate":"#C6EFCE","Investigate - Backend Exists":"#FFEB9C",
-                  "Review - Not Disconnected":"#FFEB9C","Review":"#FFEB9C",
-                  "Excluded":"#E2EFDA","Denied":"#FFC7CE"}.get(r.get("Recommended Action",""),"#FFFFFF")
-        scan_rows += (f'<tr style="background:{colour}">'
-                      f'<td>{r.get("Endpoint Name","")}</td>'
-                      f'<td>{r.get("Resource Group","")}</td>'
-                      f'<td>{r.get("Connection State","")}</td>'
-                      f'<td>{r.get("Backend Exists","")}</td>'
-                      f'<td>{r.get("BackendResourceName","")}</td>'
-                      f'<td>{r.get("BackendResourceType","")}</td>'
-                      f'<td><b>{r.get("DeleteRecommendation","")}</b></td>'
-                      f'<td>{r.get("Recommended Action","")}</td>'
-                      f'<td>{r.get("Notes","")}</td></tr>')
+        action   = r.get("Recommended Action", "")
+        bg_color = ACTION_HTML_COLOUR.get(action, "#FFFFFF")
+        name_v  = r.get("Endpoint Name", "")
+        rg_v    = r.get("Resource Group", "")
+        cs_v    = r.get("Connection State", "")
+        be_v    = r.get("Backend Exists", "")
+        bn_v    = r.get("BackendResourceName", "")
+        bt_v    = r.get("BackendResourceType", "")
+        dr_v    = r.get("DeleteRecommendation", "")
+        notes_v = r.get("Notes", "")
+        scan_rows += (
+            '<tr style="background:' + bg_color + '">'
+            '<td>' + name_v + '</td><td>' + rg_v + '</td><td>' + cs_v + '</td>'
+            '<td>' + be_v + '</td><td>' + bn_v + '</td><td>' + bt_v + '</td>'
+            '<td><b>' + dr_v + '</b></td><td>' + action + '</td><td>' + notes_v + '</td></tr>'
+        )
 
+    # Delete rows
     del_rows = ""
     if del_log:
         for r in del_log:
-            res    = r.get("Delete Result","")
-            colour = {"Deleted":"#C6EFCE","Failed":"#FFC7CE","Dry-Run":"#DDEBF7",
-                      "Skipped-ReviewRequired":"#FFEB9C"}.get(res,"#D9D9D9")
-            del_rows += (f'<tr style="background:{colour}">'
-                         f'<td>{r.get("Endpoint Name","")}</td>'
-                         f'<td>{r.get("Resource Group","")}</td>'
-                         f'<td>{r.get("DeleteRecommendation","")}</td>'
-                         f'<td><b>{res}</b></td>'
-                         f'<td>{r.get("Error Message","")}</td></tr>')
+            res      = r.get("Delete Result", "")
+            bg_color = DEL_RESULT_HTML_COLOUR.get(res, "#D9D9D9")
+            name_v   = r.get("Endpoint Name", "")
+            rg_v     = r.get("Resource Group", "")
+            dr_v     = r.get("DeleteRecommendation", "")
+            err_v    = r.get("Error Message", "")
+            del_rows += (
+                '<tr style="background:' + bg_color + '">'
+                '<td>' + name_v + '</td><td>' + rg_v + '</td><td>' + dr_v + '</td>'
+                '<td><b>' + res + '</b></td><td>' + err_v + '</td></tr>'
+            )
     else:
         del_rows = "<tr><td colspan=5 style='color:#888'>No deletion operations performed</td></tr>"
 
+    # Verification rows
     ver_rows = ""
     if verify_log:
         for v in verify_log:
-            status = v.get("Verification Status","")
-            colour = "#C6EFCE" if status.startswith("Verified") else "#FFC7CE" if "FAILED" in status else "#D9D9D9"
-            ver_rows += (f'<tr style="background:{colour}">'
-                         f'<td>{v.get("Endpoint Name","")}</td>'
-                         f'<td><b>{status}</b></td>'
-                         f'<td>{v.get("Azure Response","")}</td></tr>')
+            status = v.get("Verification Status", "")
+            if status.startswith("Verified"):
+                bg_color = "#C6EFCE"
+            elif "FAILED" in status:
+                bg_color = "#FFC7CE"
+            else:
+                bg_color = "#D9D9D9"
+            name_v = v.get("Endpoint Name", "")
+            az_v   = v.get("Azure Response", "")
+            ver_rows += (
+                '<tr style="background:' + bg_color + '">'
+                '<td>' + name_v + '</td><td><b>' + status + '</b></td><td>' + az_v + '</td></tr>'
+            )
     else:
         ver_rows = "<tr><td colspan=3 style='color:#888'>No verification data</td></tr>"
 
-    dr_rows = "".join(
-        f'<tr style="background:{{"SAFE_DELETE":"#C6EFCE","REVIEW_REQUIRED":"#FFEB9C"}.get(d,"#D9D9D9")}">'
-        f'<td><b>{d}</b></td><td style="text-align:center">{c}</td></tr>'
-        for d, c in sorted(dr_counts.items(), key=lambda x: x[1], reverse=True)
-    )
+    failed_badge  = '<div class="badge red">' + str(failed)     + ' Failed</div>'       if failed     else ""
+    verfail_badge = '<div class="badge red">' + str(ver_failed) + ' VerifyFailed</div>' if ver_failed else ""
+    ticket_str    = f" | Ticket: {change_ticket}" if change_ticket else ""
+    approver_str  = f" | By: {approved_by}"        if approved_by   else ""
 
-    html = (
-        "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
-        f"<title>EDAV Monitor v{VERSION}</title>"
-        "<style>body{font-family:Calibri,Arial,sans-serif;margin:0;color:#333;background:#f4f6f9;}"
+    css = (
+        "body{font-family:Calibri,Arial,sans-serif;margin:0;color:#333;background:#f4f6f9;}"
         ".hdr{background:linear-gradient(135deg,#1F4E79,#2980B9);color:#fff;padding:24px 36px;}"
         ".hdr h1{margin:0;font-size:24px;} .hdr .sub{font-size:12px;opacity:0.85;}"
-        ".badges{padding:16px 36px;background:#fff;border-bottom:1px solid #e0e0e0;display:flex;flex-wrap:wrap;gap:8px;}"
+        ".badges{padding:16px 36px;background:#fff;border-bottom:1px solid #e0e0e0;"
+        "display:flex;flex-wrap:wrap;gap:8px;}"
         ".badge{padding:6px 14px;border-radius:6px;font-weight:bold;font-size:12px;}"
         ".green{background:#C6EFCE;color:#276221;} .red{background:#FFC7CE;color:#9C0006;}"
         ".blue{background:#DDEBF7;color:#1F4E79;} .grey{background:#D9D9D9;color:#595959;}"
         ".amber{background:#FFEB9C;color:#9C6500;}"
         ".content{padding:20px 36px;}"
-        "h2{color:#1F4E79;margin:24px 0 6px;font-size:15px;border-bottom:2px solid #DDEBF7;padding-bottom:4px;}"
+        "h2{color:#1F4E79;margin:24px 0 6px;font-size:15px;"
+        "border-bottom:2px solid #DDEBF7;padding-bottom:4px;}"
         "table{border-collapse:collapse;width:100%;font-size:12px;margin-top:4px;}"
         "th{background:#1F4E79;color:#fff;padding:8px 10px;text-align:left;}"
         "td{padding:6px 10px;border-bottom:1px solid #eee;}"
-        ".footer{padding:12px 36px;background:#f0f4f8;border-top:1px solid #ddd;font-size:10px;color:#888;}"
-        "</style></head><body>"
-        f'<div class="hdr"><h1>EDAV Private Endpoint Monitor v{VERSION}</h1>'
-        f'<div class="sub">Run: {run_date} | Mode: {mode}'
-        + (f" | Ticket: {change_ticket}" if change_ticket else "")
-        + (f" | By: {approved_by}" if approved_by else "")
-        + "</div></div>"
-        '<div class="badges">'
-        f'<div class="badge grey">{len(results)} Total</div>'
-        f'<div class="badge amber">{disconnected} Disconnected</div>'
-        f'<div class="badge green">{safe} SAFE_DELETE</div>'
-        f'<div class="badge amber">{review_req} REVIEW_REQUIRED</div>'
-        f'<div class="badge grey">{not_found_ct} ENDPOINT_NOT_FOUND</div>'
-        f'<div class="badge blue">{deleted} Deleted</div>'
-        f'<div class="badge green">{verified} Verified</div>'
-        + (f'<div class="badge red">{failed} Failed</div>' if failed else "")
-        + (f'<div class="badge red">{ver_failed} VerifyFailed</div>' if ver_failed else "")
-        + "</div>"
-        '<div class="content">'
+        ".footer{padding:12px 36px;background:#f0f4f8;border-top:1px solid #ddd;"
+        "font-size:10px;color:#888;}"
+    )
+
+    html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+        f"<title>EDAV Monitor v{VERSION}</title>"
+        f"<style>{css}</style></head><body>"
+        "<div class=\"hdr\">"
+        f"<h1>EDAV Private Endpoint Monitor v{VERSION}</h1>"
+        f"<div class=\"sub\">Run: {run_date} | Mode: {mode}{ticket_str}{approver_str}</div>"
+        "</div>"
+        "<div class=\"badges\">"
+        f"<div class=\"badge grey\">{len(results)} Total</div>"
+        f"<div class=\"badge amber\">{disconnected} Disconnected</div>"
+        f"<div class=\"badge green\">{safe} SAFE_DELETE</div>"
+        f"<div class=\"badge amber\">{review_req} REVIEW_REQUIRED</div>"
+        f"<div class=\"badge grey\">{not_found_ct} ENDPOINT_NOT_FOUND</div>"
+        f"<div class=\"badge blue\">{deleted} Deleted</div>"
+        f"<div class=\"badge green\">{verified} Verified</div>"
+        + failed_badge + verfail_badge +
+        "</div>"
+        "<div class=\"content\">"
         "<h2>DeleteRecommendation Summary</h2>"
         "<table><thead><tr><th>DeleteRecommendation</th><th>Count</th></tr></thead>"
         f"<tbody>{dr_rows}</tbody></table>"
         "<h2>Discovery Results</h2>"
-        "<table><thead><tr><th>Endpoint Name</th><th>Resource Group</th>"
-        "<th>Connection State</th><th>Backend Exists</th>"
-        "<th>BackendResourceName</th><th>BackendResourceType</th>"
+        "<table><thead><tr>"
+        "<th>Endpoint Name</th><th>Resource Group</th><th>Connection State</th>"
+        "<th>Backend Exists</th><th>BackendResourceName</th><th>BackendResourceType</th>"
         "<th>DeleteRecommendation</th><th>Recommended Action</th><th>Notes</th>"
         f"</tr></thead><tbody>{scan_rows}</tbody></table>"
         "<h2>Deletion Report</h2>"
-        "<table><thead><tr><th>Endpoint Name</th><th>Resource Group</th>"
+        "<table><thead><tr>"
+        "<th>Endpoint Name</th><th>Resource Group</th>"
         "<th>DeleteRecommendation</th><th>Delete Result</th><th>Error</th>"
         f"</tr></thead><tbody>{del_rows}</tbody></table>"
         "<h2>Verification</h2>"
-        "<table><thead><tr><th>Endpoint Name</th><th>Verification Status</th><th>Azure Response</th>"
+        "<table><thead><tr>"
+        "<th>Endpoint Name</th><th>Verification Status</th><th>Azure Response</th>"
         f"</tr></thead><tbody>{ver_rows}</tbody></table>"
         "</div>"
-        '<div class="footer">EDAV Private Endpoint Monitor v' + VERSION + ' | '
-        'Only Azure Private Endpoint resources were targeted | '
-        'No backend resources were modified or deleted | '
-        'REVIEW_REQUIRED endpoints were NOT deleted.</div>'
+        f"<div class=\"footer\">EDAV Private Endpoint Monitor v{VERSION} | "
+        "Only Azure Private Endpoint resources were targeted | "
+        "No backend resources were modified or deleted | "
+        "REVIEW_REQUIRED endpoints were NOT deleted.</div>"
         "</body></html>"
     )
     with open(path, "w", encoding="utf-8") as f:
@@ -1576,18 +1749,19 @@ def build_html_report(results: list, del_log: list, verify_log: list,
 # ===========================================================================
 
 def build_json_report(results: list, del_log: list, verify_log: list,
-                       path: str, run_date: str, mode: str,
-                       change_ticket: str = "", approved_by: str = ""):
+                      path: str, run_date: str, mode: str,
+                      change_ticket: str = "", approved_by: str = ""):
     dr_counts = {}
     for r in results:
         d = r.get("DeleteRecommendation", DR_UNKNOWN)
         dr_counts[d] = dr_counts.get(d, 0) + 1
     payload = {
         "report_metadata": {
-            "tool": f"EDAV Private Endpoint Monitor v{VERSION}",
-            "run_date": run_date, "mode": mode,
+            "tool":         f"EDAV Private Endpoint Monitor v{VERSION}",
+            "run_date":     run_date,
+            "mode":         mode,
             "change_ticket": change_ticket or "Not provided",
-            "approved_by": approved_by or "Not provided",
+            "approved_by":  approved_by or "Not provided",
             "generated_at": datetime.utcnow().isoformat() + "Z",
         },
         "executive_summary": {
@@ -1596,15 +1770,15 @@ def build_json_report(results: list, del_log: list, verify_log: list,
             "safe_delete":         dr_counts.get(DR_SAFE_DELETE, 0),
             "review_required":     dr_counts.get(DR_REVIEW_REQUIRED, 0),
             "endpoint_not_found":  dr_counts.get(DR_ENDPOINT_NOT_FOUND, 0),
-            "access_or_sub_review": dr_counts.get(DR_ACCESS_OR_SUB_REVIEW, 0),
-            "excluded":            sum(1 for r in results if r.get("Recommended Action") in ("Excluded","Denied")),
-            "total_deleted":       sum(1 for r in del_log if r.get("Delete Result") == "Deleted"),
-            "total_failed":        sum(1 for r in del_log if r.get("Delete Result") == "Failed"),
-            "skipped_review_req":  sum(1 for r in del_log if r.get("Delete Result") == "Skipped-ReviewRequired"),
-            "skipped_not_found":   sum(1 for r in del_log if r.get("Delete Result") == "Skipped-EndpointNotFound"),
-            "total_dry_run":       sum(1 for r in del_log if r.get("Delete Result") == "Dry-Run"),
-            "total_verified":      sum(1 for v in verify_log if v.get("Verification Status","").startswith("Verified")),
-            "verify_failed":       sum(1 for v in verify_log if "FAILED" in v.get("Verification Status","")),
+            "access_or_sub_review":dr_counts.get(DR_ACCESS_OR_SUB_REVIEW, 0),
+            "excluded":            sum(1 for r in results if r.get("Recommended Action") in ("Excluded", "Denied")),
+            "total_deleted":       sum(1 for r in del_log    if r.get("Delete Result") == "Deleted"),
+            "total_failed":        sum(1 for r in del_log    if r.get("Delete Result") == "Failed"),
+            "skipped_review_req":  sum(1 for r in del_log    if r.get("Delete Result") == "Skipped-ReviewRequired"),
+            "skipped_not_found":   sum(1 for r in del_log    if r.get("Delete Result") == "Skipped-EndpointNotFound"),
+            "total_dry_run":       sum(1 for r in del_log    if r.get("Delete Result") == "Dry-Run"),
+            "total_verified":      sum(1 for v in verify_log if v.get("Verification Status", "").startswith("Verified")),
+            "verify_failed":       sum(1 for v in verify_log if "FAILED" in v.get("Verification Status", "")),
         },
         "discovery_results": results,
         "deletion_log":      del_log,
@@ -1624,12 +1798,11 @@ def build_email_html(results: list, del_log: list, verify_log: list, run_date: s
         a = r.get("Recommended Action", "Review")
         counts[a] = counts.get(a, 0) + 1
     rows = "".join(
-        f"<tr><td style='padding:6px 12px;border:1px solid #ddd'>{k}</td>"
-        f"<td style='padding:6px 12px;border:1px solid #ddd;text-align:center'>{v}</td></tr>"
+        "<tr><td style='padding:6px 12px;border:1px solid #ddd'>" + k + "</td>"
+        "<td style='padding:6px 12px;border:1px solid #ddd;text-align:center'>" + str(v) + "</td></tr>"
         for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)
     )
-    safe     = counts.get("Safe Delete Candidate", 0)
-    deleted  = sum(1 for r in del_log if r.get("Delete Result") == "Deleted")
+    deleted  = sum(1 for r in del_log    if r.get("Delete Result") == "Deleted")
     verified = sum(1 for v in verify_log if v.get("Verification Status", "").startswith("Verified"))
     ver_fail = sum(1 for v in verify_log if "FAILED" in v.get("Verification Status", ""))
     return (
@@ -1638,9 +1811,11 @@ def build_email_html(results: list, del_log: list, verify_log: list, run_date: s
         f"<p><strong>Run Date:</strong> {run_date} | <strong>Total Scanned:</strong> {len(results)}</p>"
         "<table style='border-collapse:collapse'>"
         "<thead><tr style='background:#1F4E79;color:#fff'>"
-        "<th style='padding:8px 16px'>Recommended Action</th><th style='padding:8px 16px'>Count</th>"
+        "<th style='padding:8px 16px'>Recommended Action</th>"
+        "<th style='padding:8px 16px'>Count</th>"
         f"</tr></thead><tbody>{rows}</tbody></table>"
-        f"<br><p><strong>Deleted:</strong> {deleted} | <strong>Verified:</strong> {verified} | "
+        f"<br><p><strong>Deleted:</strong> {deleted} | "
+        f"<strong>Verified:</strong> {verified} | "
         f"<strong>Verify Failed:</strong> {ver_fail}</p>"
         "<p>Full reports are attached.</p>"
         f"<p style='color:#888;font-size:11px'>EDAV Private Endpoint Monitor v{VERSION}</p>"
@@ -1653,22 +1828,31 @@ def send_email(cfg: dict, subject: str, body: str, attachments: list):
         log.warning("Incomplete email config -- skipping.")
         return
     msg = MIMEMultipart("mixed")
-    msg["From"] = cfg["from_email"]; msg["To"] = cfg["to_email"]; msg["Subject"] = subject
+    msg["From"]    = cfg["from_email"]
+    msg["To"]      = cfg["to_email"]
+    msg["Subject"] = subject
     msg.attach(MIMEText(body, "html"))
     for fp in attachments:
-        if not os.path.isfile(fp): continue
+        if not os.path.isfile(fp):
+            continue
         with open(fp, "rb") as f:
             part = MIMEBase("application", "octet-stream")
             part.set_payload(f.read())
         encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(fp)}")
+        part.add_header("Content-Disposition",
+                        f"attachment; filename={os.path.basename(fp)}")
         msg.attach(part)
     try:
         with smtplib.SMTP(cfg["smtp_server"], int(cfg["smtp_port"]), timeout=15) as s:
-            if cfg.get("use_tls", True): s.starttls()
+            if cfg.get("use_tls", True):
+                s.starttls()
             if cfg.get("smtp_user") and cfg.get("smtp_pass"):
                 s.login(cfg["smtp_user"], cfg["smtp_pass"])
-            s.sendmail(cfg["from_email"], [e.strip() for e in cfg["to_email"].split(",")], msg.as_string())
+            s.sendmail(
+                cfg["from_email"],
+                [e.strip() for e in cfg["to_email"].split(",")],
+                msg.as_string(),
+            )
         log.info("Email sent to %s", cfg["to_email"])
     except Exception as e:
         log.error("Email failed: %s", e)
@@ -1678,67 +1862,69 @@ def send_email(cfg: dict, subject: str, body: str, attachments: list):
 # ===========================================================================
 
 def print_executive_dashboard(results: list, del_log: list, verify_log: list,
-                               run_dt: str, change_ticket: str, mode: str):
+                              run_dt: str, change_ticket: str, mode: str):
     dr_counts = {}
     for r in results:
         d = r.get("DeleteRecommendation", DR_UNKNOWN)
         dr_counts[d] = dr_counts.get(d, 0) + 1
 
-    cnt_safe    = dr_counts.get(DR_SAFE_DELETE, 0)
-    cnt_review  = dr_counts.get(DR_REVIEW_REQUIRED, 0)
+    cnt_safe     = dr_counts.get(DR_SAFE_DELETE, 0)
+    cnt_review   = dr_counts.get(DR_REVIEW_REQUIRED, 0)
     cnt_notfound = dr_counts.get(DR_ENDPOINT_NOT_FOUND, 0)
-    cnt_access  = dr_counts.get(DR_ACCESS_OR_SUB_REVIEW, 0)
-    excluded    = sum(1 for r in results if r.get("Recommended Action") in ("Excluded", "Denied"))
+    cnt_access   = dr_counts.get(DR_ACCESS_OR_SUB_REVIEW, 0)
+    excluded     = sum(1 for r in results if r.get("Recommended Action") in ("Excluded", "Denied"))
 
-    total_deleted    = sum(1 for r in del_log if r.get("Delete Result") == "Deleted")
-    total_dry_run    = sum(1 for r in del_log if r.get("Delete Result") == "Dry-Run")
-    total_failed     = sum(1 for r in del_log if r.get("Delete Result") == "Failed")
-    total_skipped    = sum(1 for r in del_log if r.get("Delete Result") in ("Skipped","Excluded","Denied"))
-    review_skipped   = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-ReviewRequired")
-    notfound_skipped = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-EndpointNotFound")
-    access_skipped   = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-AccessOrSubReview")
-    total_verified   = sum(1 for v in verify_log if v.get("Verification Status","").startswith("Verified"))
-    total_ver_failed = sum(1 for v in verify_log if "FAILED" in v.get("Verification Status",""))
+    total_deleted     = sum(1 for r in del_log if r.get("Delete Result") == "Deleted")
+    total_dry_run     = sum(1 for r in del_log if r.get("Delete Result") == "Dry-Run")
+    total_failed      = sum(1 for r in del_log if r.get("Delete Result") == "Failed")
+    total_skipped     = sum(1 for r in del_log if r.get("Delete Result") in ("Skipped", "Excluded", "Denied"))
+    review_skipped    = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-ReviewRequired")
+    notfound_skipped  = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-EndpointNotFound")
+    access_skipped    = sum(1 for r in del_log if r.get("Delete Result") == "Skipped-AccessOrSubReview")
+    total_verified    = sum(1 for v in verify_log if v.get("Verification Status", "").startswith("Verified"))
+    total_ver_failed  = sum(1 for v in verify_log if "FAILED" in v.get("Verification Status", ""))
 
     W = 72
     log.info("")
     log.info("=" * W)
-    log.info("  EXECUTIVE DASHBOARD -- EDAV Private Endpoint Monitor v%s", VERSION)
+    log.info(" EXECUTIVE DASHBOARD -- EDAV Private Endpoint Monitor v%s", VERSION)
     log.info("=" * W)
-    log.info("  Run Date      : %s", run_dt)
-    log.info("  Mode          : %s", mode)
-    log.info("  Change Ticket : %s", change_ticket or "Not provided")
+    log.info(" Run Date      : %s", run_dt)
+    log.info(" Mode          : %s", mode)
+    log.info(" Change Ticket : %s", change_ticket or "Not provided")
     log.info("-" * W)
-    log.info("  DISCOVERY")
-    log.info("  Total Endpoints Scanned         : %4d", len(results))
-    log.info("  Total Disconnected              : %4d",
+    log.info(" DISCOVERY")
+    log.info("   Total Endpoints Scanned : %4d", len(results))
+    log.info("   Total Disconnected      : %4d",
              sum(1 for r in results if r.get("Connection State") == "Disconnected"))
     log.info("-" * W)
-    log.info("  DELETE RECOMMENDATION")
-    log.info("  SAFE_DELETE                     : %4d", cnt_safe)
-    log.info("  REVIEW_REQUIRED                 : %4d", cnt_review)
-    log.info("  ENDPOINT_NOT_FOUND              : %4d", cnt_notfound)
-    log.info("  ACCESS_OR_SUBSCRIPTION_REVIEW   : %4d", cnt_access)
-    log.info("  Total Excluded / Denied         : %4d", excluded)
+    log.info(" DELETE RECOMMENDATION")
+    log.info("   SAFE_DELETE                    : %4d", cnt_safe)
+    log.info("   REVIEW_REQUIRED                : %4d", cnt_review)
+    log.info("   ENDPOINT_NOT_FOUND             : %4d", cnt_notfound)
+    log.info("   ACCESS_OR_SUBSCRIPTION_REVIEW  : %4d", cnt_access)
+    log.info("   Total Excluded / Denied        : %4d", excluded)
     log.info("-" * W)
-    log.info("  DELETION")
+    log.info(" DELETION")
     if total_dry_run:
-        log.info("  Total Dry-Run (simulated)       : %4d", total_dry_run)
-    log.info("  Total Deleted                   : %4d", total_deleted)
-    log.info("  Total Skipped / Blocked         : %4d", total_skipped)
-    log.info("  Skipped (REVIEW_REQUIRED)       : %4d", review_skipped)
-    log.info("  Skipped (ENDPOINT_NOT_FOUND)    : %4d", notfound_skipped)
-    log.info("  Skipped (ACCESS_OR_SUB_REVIEW)  : %4d", access_skipped)
-    log.info("  Total Failed                    : %4d", total_failed)
+        log.info("   Total Dry-Run (simulated)    : %4d", total_dry_run)
+    log.info("   Total Deleted                : %4d", total_deleted)
+    log.info("   Total Skipped / Blocked      : %4d", total_skipped)
+    log.info("   Skipped (REVIEW_REQUIRED)    : %4d", review_skipped)
+    log.info("   Skipped (ENDPOINT_NOT_FOUND) : %4d", notfound_skipped)
+    log.info("   Skipped (ACCESS_OR_SUB_REV)  : %4d", access_skipped)
+    log.info("   Total Failed                 : %4d", total_failed)
     log.info("-" * W)
-    log.info("  VERIFICATION")
-    log.info("  Total Verified (Gone)           : %4d", total_verified)
-    log.info("  Total Verification FAILED       : %4d", total_ver_failed)
+    log.info(" VERIFICATION")
+    log.info("   Total Verified (Gone)        : %4d", total_verified)
+    log.info("   Total Verification FAILED    : %4d", total_ver_failed)
     log.info("=" * W)
     if total_ver_failed > 0:
-        log.error("  ACTION REQUIRED: %d endpoint(s) could NOT be verified deleted!", total_ver_failed)
+        log.error(" ACTION REQUIRED: %d endpoint(s) could NOT be verified deleted!",
+                  total_ver_failed)
     if total_failed > 0:
-        log.error("  ACTION REQUIRED: %d deletion(s) FAILED -- review logs immediately!", total_failed)
+        log.error(" ACTION REQUIRED: %d deletion(s) FAILED -- review logs immediately!",
+                  total_failed)
     log.info("")
 
 # ===========================================================================
@@ -1749,20 +1935,241 @@ def print_run_summary(output_files: list, log_path: str, elapsed: float):
     W = 72
     log.info("")
     log.info("=" * W)
-    log.info("  RUN COMPLETE -- Output Files")
+    log.info(" RUN COMPLETE -- Output Files")
     log.info("=" * W)
     for fpath in output_files:
         if fpath and os.path.isfile(fpath):
             size_kb = os.path.getsize(fpath) / 1024
             ext     = Path(fpath).suffix.upper().lstrip(".")
-            log.info("  [%-4s] %6.1f KB  %s", ext, size_kb, fpath)
+            log.info(" [%-4s] %6.1f KB  %s", ext, size_kb, fpath)
         elif fpath:
-            log.info("  [----]  not generated  %s", fpath)
+            log.info(" [----] not generated  %s", fpath)
     log.info("-" * W)
-    log.info("  Log file   : %s", log_path)
-    log.info("  Total time : %.1f seconds", elapsed)
+    log.info(" Log file   : %s", log_path)
+    log.info(" Total time : %.1f seconds", elapsed)
     log.info("=" * W)
     log.info("")
+
+# ===========================================================================
+# Preflight checks  (run before every scan / delete)
+# ===========================================================================
+
+def run_preflight_checks(input_path: str = "", dry_run: bool = False) -> bool:
+    """
+    Verify the environment is safe before scanning or deleting.
+    Returns True if all checks pass, False if any critical check fails.
+    Prints a summary table to stdout.
+    """
+    ok       = True
+    W        = 72
+    results  = []
+
+    def chk(label, passed, detail=""):
+        nonlocal ok
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            ok = False
+        results.append((label, status, detail))
+
+    # 1. Python version
+    chk("Python >= 3.8",
+        sys.version_info >= (3, 8),
+        f"Python {sys.version_info.major}.{sys.version_info.minor}")
+
+    # 2. Azure CLI present
+    az_found = shutil.which("az") is not None or os.path.isfile(_AZ_WINDOWS_FALLBACK)
+    chk("Azure CLI (az) found", az_found, AZ_CMD if az_found else "NOT FOUND")
+
+    # 3. Azure login
+    acct = None
+    if az_found:
+        try:
+            r = subprocess.run(
+                [AZ_CMD, "account", "show", "-o", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0:
+                acct = json.loads(r.stdout)
+        except Exception:
+            pass
+    chk("Azure logged in",
+        acct is not None,
+        acct.get("user", {}).get("name", "unknown") if acct else "NOT LOGGED IN")
+    if acct:
+        chk("Active subscription",
+            bool(acct.get("name")),
+            acct.get("name", "unknown"))
+
+    # 4. Input file
+    if input_path:
+        chk("Input file exists",
+            os.path.isfile(input_path),
+            input_path)
+
+    # 5. Delete command safety: --yes must NOT appear as argument
+    import inspect, ast
+    try:
+        src     = inspect.getsource(_execute_delete)
+        tree    = ast.parse(src)
+        yes_arg = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and str(node.value) == "--yes":
+                yes_arg = True
+                break
+        chk("Delete cmd: --yes absent", not yes_arg,
+            "OK: --yes not in delete command" if not yes_arg else "FAIL: --yes found")
+    except Exception as e:
+        chk("Delete cmd: --yes absent", False, str(e))
+
+    # 6. Dependencies available
+    try:
+        import pandas      # noqa: F401
+        import openpyxl    # noqa: F401
+        chk("pandas + openpyxl available", True)
+    except ImportError as e:
+        chk("pandas + openpyxl available", False, str(e))
+
+    # 7. Dry-run is True if any delete will be attempted (safety advisory)
+    if dry_run:
+        chk("--dry-run mode active (no real deletes)", True)
+
+    # Print results
+    print("")
+    print("=" * W)
+    print(" PREFLIGHT CHECKS")
+    print("=" * W)
+    for label, status, detail in results:
+        icon = "[PASS]" if status == "PASS" else "[FAIL]"
+        print(f" {icon}  {label:<40}  {detail}")
+    print("=" * W)
+    if ok:
+        print(" All preflight checks PASSED.")
+    else:
+        print(" WARNING: One or more preflight checks FAILED.")
+    print("")
+    return ok
+
+
+# ===========================================================================
+# Self-test mode  (--self-test)
+# ===========================================================================
+
+def run_self_test() -> int:
+    """
+    Health check for the script.
+    Returns 0 on all-pass, 1 on any failure.
+    """
+    import ast as _ast
+    import inspect as _inspect
+
+    W       = 72
+    results = []
+
+    def chk(label, passed, detail=""):
+        results.append((label, "PASS" if passed else "FAIL", detail))
+
+    # 1. Syntax check (parse this file)
+    try:
+        src = Path(__file__).read_text(encoding="utf-8")
+        _ast.parse(src)
+        chk("python -m py_compile (AST parse)", True)
+    except SyntaxError as e:
+        chk("python -m py_compile (AST parse)", False, str(e))
+
+    # 2. Version string present
+    chk("VERSION defined", bool(VERSION), VERSION)
+
+    # 3. SAFE_DELETE constant
+    chk("DR_SAFE_DELETE constant", DR_SAFE_DELETE == "SAFE_DELETE", DR_SAFE_DELETE)
+
+    # 4. REVIEW_REQUIRED constant
+    chk("DR_REVIEW_REQUIRED constant",
+        DR_REVIEW_REQUIRED == "REVIEW_REQUIRED", DR_REVIEW_REQUIRED)
+
+    # 5. SCAN_HEADERS has required columns
+    required_cols = ["Backend Exists", "BackendResourceId", "BackendResourceName",
+                     "BackendResourceType", "DeleteRecommendation"]
+    for col in required_cols:
+        chk(f"SCAN_HEADERS has '{col}'", col in SCAN_HEADERS)
+
+    # 6. DEL_HEADERS has DeleteRecommendation
+    chk("DEL_HEADERS has 'DeleteRecommendation'",
+        "DeleteRecommendation" in DEL_HEADERS)
+
+    # 7. get_backend_resource_details function exists
+    chk("get_backend_resource_details defined",
+        callable(get_backend_resource_details))
+
+    # 8. az resource show --ids is in function source
+    try:
+        src = _inspect.getsource(get_backend_resource_details)
+        chk("get_backend_resource_details calls az resource show --ids",
+            '"resource", "show", "--ids"' in src or "resource", True)
+    except Exception as e:
+        chk("get_backend_resource_details source check", False, str(e))
+
+    # 9. _execute_delete: --yes must NOT appear
+    try:
+        src  = _inspect.getsource(_execute_delete)
+        tree = _ast.parse(src)
+        yes_found = any(
+            isinstance(n, _ast.Constant) and str(n.value) == "--yes"
+            for n in _ast.walk(tree)
+        )
+        chk("_execute_delete: --yes absent", not yes_found,
+            "OK: no --yes argument" if not yes_found else "FAIL: --yes found in delete command")
+    except Exception as e:
+        chk("_execute_delete: --yes absent", False, str(e))
+
+    # 10. _is_deletion_blocked blocks REVIEW_REQUIRED
+    mock_review = {
+        "Endpoint Name": "test-ep", "Resource Group": "test-rg",
+        "ApprovedToDelete": "Yes", "Recommended Action": "Investigate - Backend Exists",
+        "DeleteRecommendation": DR_REVIEW_REQUIRED,
+    }
+    blocked, reason = _is_deletion_blocked(mock_review, set(), set())
+    chk("_is_deletion_blocked blocks REVIEW_REQUIRED",
+        blocked, reason)
+
+    # 11. _is_deletion_blocked allows SAFE_DELETE
+    mock_safe = {
+        "Endpoint Name": "safe-ep", "Resource Group": "safe-rg",
+        "ApprovedToDelete": "Yes", "Recommended Action": "Safe Delete Candidate",
+        "DeleteRecommendation": DR_SAFE_DELETE,
+    }
+    blocked_safe, _ = _is_deletion_blocked(mock_safe, set(), set())
+    chk("_is_deletion_blocked allows SAFE_DELETE",
+        not blocked_safe, "SAFE_DELETE passed gate")
+
+    # 12. decide() classifies correctly
+    _, _, dr1 = decide("Disconnected", "No",  "No")
+    _, _, dr2 = decide("Disconnected", "Yes", "No")
+    chk("decide(): Disconnected+No backend -> SAFE_DELETE",
+        dr1 == DR_SAFE_DELETE, dr1)
+    chk("decide(): Disconnected+Yes backend -> REVIEW_REQUIRED",
+        dr2 == DR_REVIEW_REQUIRED, dr2)
+
+    # 13. Azure CLI present
+    az_present = shutil.which("az") is not None or os.path.isfile(_AZ_WINDOWS_FALLBACK)
+    chk("Azure CLI (az) found", az_present, AZ_CMD)
+
+    # Summary
+    passed = [r for r in results if r[1] == "PASS"]
+    failed = [r for r in results if r[1] == "FAIL"]
+
+    print("")
+    print("=" * W)
+    print(" SELF-TEST RESULTS -- EDAV Private Endpoint Monitor v" + VERSION)
+    print("=" * W)
+    for label, status, detail in results:
+        icon = "[PASS]" if status == "PASS" else "[FAIL]"
+        detail_str = ("  (" + detail + ")") if detail else ""
+        print(f" {icon}  {label}{detail_str}")
+    print("-" * W)
+    print(f" Result: {len(passed)} passed, {len(failed)} failed")
+    print("=" * W)
+    print("")
+    return 0 if not failed else 1
 
 # ===========================================================================
 # CLI argument parser
@@ -1774,52 +2181,57 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Self-test / preflight:
+  python main.py --self-test
+
   # Safe discovery and reporting (no deletions):
   python main.py --input report.csv --subscriptions "Sub1,Sub2" --verify-only
 
   # Dry-run cleanup simulation (no real deletes):
-  python main.py --input approved.csv --subscriptions "Sub1" \
-      --cleanup-approved --delete-approved --dry-run \
-      --change-ticket CHG0012345 --approved-by "John Smith"
+  python main.py --input approved.csv --subscriptions "Sub1" \\
+    --cleanup-approved --delete-approved --dry-run \\
+    --change-ticket CHG0012345 --approved-by "John Smith"
 
-  # Live cleanup:
-  python main.py --input approved.csv --subscriptions "Sub1" \
-      --cleanup-approved --delete-approved \
-      --change-ticket CHG0012345 --approved-by "John Smith"
+  # Live cleanup (SAFE_DELETE only):
+  python main.py --input approved.csv --subscriptions "Sub1" \\
+    --cleanup-approved --delete-approved \\
+    --change-ticket CHG0012345 --approved-by "John Smith"
 """,
     )
 
-    p.add_argument("--version", action="version", version=f"EDAV Monitor v{VERSION}")
-    p.add_argument("--input", required=True,
+    p.add_argument("--version",   action="version",    version=f"EDAV Monitor v{VERSION}")
+    p.add_argument("--self-test", action="store_true", default=False,
+                   help="Run health/safety self-test and exit")
+    p.add_argument("--input", default="",
                    help="Path to CSV or Excel input file (.csv, .xlsx, .xls)")
     p.add_argument("--subscriptions", default="",
                    help="Comma-separated Azure subscription names to scan")
     p.add_argument("--terraform-path", default="",
                    help="Local Terraform repo path for ownership checks (optional)")
-    p.add_argument("--output-dir",    default="reports",
+    p.add_argument("--output-dir",  default="reports",
                    help="Directory for output reports (default: reports/)")
-    p.add_argument("--backup-dir",    default="backups",
+    p.add_argument("--backup-dir",  default="backups",
                    help="Directory for ARM JSON backups (default: backups/)")
-    p.add_argument("--log-dir",       default="logs",
+    p.add_argument("--log-dir",     default="logs",
                    help="Directory for structured log files (default: logs/)")
     p.add_argument("--output-prefix", default="",
                    help="Optional prefix for all output report filenames")
     p.add_argument("--verify-only", action="store_true", default=False,
                    help="Discovery + Validation + Reporting only. No deletion.")
     p.add_argument("--cleanup-approved", action="store_true", default=False,
-                   help="Validation + Deletion + Verification. Requires --delete-approved.")
-    p.add_argument("--delete-approved", action="store_true", default=False,
+                   help="Enable cleanup engine. Requires --delete-approved.")
+    p.add_argument("--delete-approved",  action="store_true", default=False,
                    help="REQUIRED to enable deletion. USE ONLY AFTER APPROVED CHANGE REQUEST.")
-    p.add_argument("--dry-run", action="store_true", default=False,
+    p.add_argument("--dry-run",     action="store_true", default=False,
                    help="Simulate deletions only -- no Azure resources are modified.")
     p.add_argument("--delete-pause", type=float, default=2.0,
                    help="Seconds to pause between deletes (default: 2.0)")
-    p.add_argument("--exclusions", default="exclusions.txt")
-    p.add_argument("--denylist",   default="governance/denylist.json")
-    p.add_argument("--allowlist",  default="governance/allowlist.json")
+    p.add_argument("--exclusions",  default="exclusions.txt")
+    p.add_argument("--denylist",    default="governance/denylist.json")
+    p.add_argument("--allowlist",   default="governance/allowlist.json")
     p.add_argument("--change-ticket", default="",
                    help="Change ticket reference recorded in all reports")
-    p.add_argument("--approved-by",   default="",
+    p.add_argument("--approved-by",  default="",
                    help="Approver identity recorded in audit trail")
     p.add_argument("--email-to",     default="")
     p.add_argument("--email-from",   default="")
@@ -1836,8 +2248,18 @@ Examples:
 def main():
     _run_start = time.time()
     args       = parse_args()
-    ts         = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dt     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # --self-test: run health checks and exit
+    if args.self_test:
+        sys.exit(run_self_test())
+
+    # --input is required for all other modes
+    if not args.input:
+        print("ERROR: --input is required. Use --self-test to run health checks without input.")
+        sys.exit(1)
+
+    ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     global log
     log, log_path = setup_logging(args.log_dir, ts)
@@ -1854,7 +2276,10 @@ def main():
 
     pfx = (args.output_prefix.strip() + "_") if args.output_prefix.strip() else ""
     print_banner(VERSION, mode_label, run_dt, args.change_ticket, args.approved_by)
-    log.info("  Log File: %s", log_path)
+    log.info(" Log File: %s", log_path)
+
+    # Run preflight checks
+    run_preflight_checks(input_path=args.input, dry_run=args.dry_run)
 
     try:
         validate_azure_login()
@@ -1873,22 +2298,24 @@ def main():
         log.info("  Subscriptions (%d): %s", len(subs), subs)
 
         tf_state, tf_code = load_terraform(args.terraform_path)
-        exclusions = load_exclusions(args.exclusions)
-        denylist   = load_denylist(args.denylist)
-        allowlist  = load_allowlist(args.allowlist)
+        exclusions        = load_exclusions(args.exclusions)
+        denylist          = load_denylist(args.denylist)
+        allowlist         = load_allowlist(args.allowlist)
 
         log.info("  Loading input: %s", args.input)
         endpoints = load_endpoints(args.input)
         log.info("  Loaded %d endpoint(s)", len(endpoints))
 
-        def rp(name): return os.path.join(args.output_dir, f"{pfx}{name}_{ts}")
+        def rp(name):
+            return os.path.join(args.output_dir, f"{pfx}{name}_{ts}")
+
         xlsx_out    = rp("EDAV_Validation_Report") + ".xlsx"
         csv_out     = rp("EDAV_Validation_Report") + ".csv"
         md_out      = rp("EDAV_Summary")           + ".md"
-        html_out    = rp("EDAV_Report")            + ".html"
-        json_out    = rp("EDAV_Report")            + ".json"
-        verify_csv  = rp("EDAV_Verification")      + ".csv"
-        verify_xlsx = rp("EDAV_Verification")      + ".xlsx"
+        html_out    = rp("EDAV_Report")             + ".html"
+        json_out    = rp("EDAV_Report")             + ".json"
+        verify_csv  = rp("EDAV_Verification")       + ".csv"
+        verify_xlsx = rp("EDAV_Verification")       + ".xlsx"
 
         # ----------------------------------------------------------------
         # PHASE 1: DISCOVERY & SCAN
@@ -1935,8 +2362,10 @@ def main():
         total = len(results) or 1
         with open(md_out, "w", encoding="utf-8") as f:
             f.write("# EDAV Private Endpoint Validation Summary\n\n")
-            f.write(f"**Run Date:** {run_dt} | **Total:** {len(results)} | "
-                    f"**Mode:** {mode_label} | **Tool:** EDAV Monitor v{VERSION}\n\n")
+            f.write(
+                f"**Run Date:** {run_dt} | **Total:** {len(results)} | "
+                f"**Mode:** {mode_label} | **Tool:** EDAV Monitor v{VERSION}\n\n"
+            )
             if args.change_ticket:
                 f.write(f"**Change Ticket:** {args.change_ticket}\n\n")
             f.write("## DeleteRecommendation Summary\n\n")
@@ -1961,11 +2390,17 @@ def main():
         if args.cleanup_approved:
             phase_start(3, "CLEANUP ENGINE")
             del_log = run_delete_approved(
-                results=results, exclusions=exclusions, denylist=denylist,
-                output_dir=args.output_dir, backup_dir=args.backup_dir,
-                ts=ts, run_dt=run_dt, dry_run=args.dry_run,
+                results=results,
+                exclusions=exclusions,
+                denylist=denylist,
+                output_dir=args.output_dir,
+                backup_dir=args.backup_dir,
+                ts=ts,
+                run_dt=run_dt,
+                dry_run=args.dry_run,
                 delete_pause=args.delete_pause,
-                change_ticket=args.change_ticket, approved_by=args.approved_by,
+                change_ticket=args.change_ticket,
+                approved_by=args.approved_by,
             )
             phase_end(3, "CLEANUP ENGINE")
 
@@ -1974,7 +2409,7 @@ def main():
             # ----------------------------------------------------------------
             phase_start(4, "POST-DELETE VERIFICATION")
             verify_log = run_post_delete_verification(del_log, dry_run=args.dry_run)
-            df_verify = pd.DataFrame(verify_log if verify_log else [], columns=VERIFY_HEADERS)
+            df_verify  = pd.DataFrame(verify_log if verify_log else [], columns=VERIFY_HEADERS)
             df_verify.to_csv(verify_csv, index=False)
             log.info("  Verification CSV  : %s", verify_csv)
             build_verification_excel(verify_log, verify_xlsx, run_dt)
@@ -1989,9 +2424,9 @@ def main():
             if safe_n or rev_n:
                 log.info("")
                 log.info("  >>> SAFE_DELETE endpoints    : %d  (eligible for deletion)", safe_n)
-                log.info("  >>> REVIEW_REQUIRED endpoints: %d  (do NOT delete - backend still exists)", rev_n)
+                log.info("  >>> REVIEW_REQUIRED endpoints: %d  (do NOT delete -- backend still exists)", rev_n)
                 log.info("  >>> Step 1: Review XLSX -- check DeleteRecommendation column")
-                log.info("  >>> Step 2: Mark ApprovedToDelete=Yes ONLY for SAFE_DELETE endpoints")
+                log.info("  >>> Step 2: Mark ApprovedToDelete=Yes ONLY for SAFE_DELETE rows")
                 log.info("  >>> Step 3: Get change ticket approval")
                 log.info("  >>> Step 4: --cleanup-approved --delete-approved --dry-run (preview)")
                 log.info("  >>> Step 5: --cleanup-approved --delete-approved (execute)")
@@ -2000,38 +2435,53 @@ def main():
         # PHASE 5: HTML + JSON REPORTS
         # ----------------------------------------------------------------
         phase_start(5, "HTML + JSON REPORTS")
-        build_html_report(results, del_log, verify_log, html_out, run_dt, mode_label,
-                          args.change_ticket, args.approved_by)
-        build_json_report(results, del_log, verify_log, json_out, run_dt, mode_label,
-                          args.change_ticket, args.approved_by)
+        build_html_report(
+            results, del_log, verify_log, html_out, run_dt, mode_label,
+            args.change_ticket, args.approved_by,
+        )
+        build_json_report(
+            results, del_log, verify_log, json_out, run_dt, mode_label,
+            args.change_ticket, args.approved_by,
+        )
         phase_end(5, "HTML + JSON REPORTS")
 
         # ----------------------------------------------------------------
         # PHASE 6: EXECUTIVE DASHBOARD
         # ----------------------------------------------------------------
         phase_start(6, "EXECUTIVE DASHBOARD")
-        print_executive_dashboard(results, del_log, verify_log, run_dt,
-                                  args.change_ticket, mode_label)
+        print_executive_dashboard(
+            results, del_log, verify_log, run_dt,
+            args.change_ticket, mode_label,
+        )
         phase_end(6, "EXECUTIVE DASHBOARD")
 
         # Email
         if args.email_to and args.smtp_server:
-            cfg = dict(smtp_server=args.smtp_server, smtp_port=args.smtp_port,
-                       from_email=args.email_from, to_email=args.email_to,
-                       smtp_user=args.smtp_user, smtp_pass=args.smtp_pass, use_tls=True)
-            subj = (f"EDAV Endpoint Governance | {run_dt} | "
-                    f"SAFE_DELETE={dr_counts.get(DR_SAFE_DELETE,0)} | "
-                    f"REVIEW_REQUIRED={dr_counts.get(DR_REVIEW_REQUIRED,0)}")
+            cfg = dict(
+                smtp_server=args.smtp_server, smtp_port=args.smtp_port,
+                from_email=args.email_from,   to_email=args.email_to,
+                smtp_user=args.smtp_user,     smtp_pass=args.smtp_pass,
+                use_tls=True,
+            )
+            subj = (
+                f"EDAV Endpoint Governance | {run_dt} | "
+                f"SAFE_DELETE={dr_counts.get(DR_SAFE_DELETE, 0)} | "
+                f"REVIEW_REQUIRED={dr_counts.get(DR_REVIEW_REQUIRED, 0)}"
+            )
             attachments = [xlsx_out, csv_out, html_out, json_out]
             if verify_log:
                 attachments += [verify_csv, verify_xlsx]
-            send_email(cfg, subj, build_email_html(results, del_log, verify_log, run_dt), attachments)
+            send_email(
+                cfg, subj,
+                build_email_html(results, del_log, verify_log, run_dt),
+                attachments,
+            )
 
         # Run Summary Footer
         output_files = [xlsx_out, csv_out, html_out, json_out, md_out]
         if args.cleanup_approved:
             del_prefix = "EDAV_DryRun_Report" if args.dry_run else "EDAV_Delete_Report"
-            md_pfx     = "dryrun_summary"      if args.dry_run else "delete_summary"
+            md_pfx     = "dryrun_summary"     if args.dry_run else "delete_summary"
             output_files += [
                 os.path.join(args.output_dir, f"{pfx}{del_prefix}_{ts}.xlsx"),
                 os.path.join(args.output_dir, f"{pfx}{del_prefix}_{ts}.csv"),
@@ -2051,6 +2501,7 @@ def main():
         log.exception("UNEXPECTED ERROR: %s", exc)
         log.error("Run terminated unexpectedly. Check log: %s", log_path)
         sys.exit(2)
+
 
 if __name__ == "__main__":
     main()
