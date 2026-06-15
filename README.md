@@ -1,245 +1,232 @@
-# EDAV Private Endpoint Monitor v4.0.0
+# EDAV Resource Monitor Cleanup Platform v5.0.0
 
-> **Enterprise Azure Governance and Cleanup Platform**
-> Identifies disconnected private endpoints, validates backend resources and Terraform ownership,
-> generates colour-coded Excel/CSV/HTML/JSON/Markdown reports, creates ARM JSON backups,
-> produces rollback instructions, safely decommissions approved endpoints with full audit trail,
-> and **verifies every deletion** by confirming Azure returns ResourceNotFound.
->
-> **Nothing is deleted without validation, approval, a change request, and a typed CONFIRM.**
+> **Enterprise Azure governance, cost-reduction, and safe cleanup platform for the EDAV Resource Monitor dashboard.**
 
----
+[![Platform](https://img.shields.io/badge/Platform-Azure-blue)](https://azure.microsoft.com)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-green)](https://python.org)
+[![Safety](https://img.shields.io/badge/Safety-15_Gate_Model-brightgreen)](docs/architecture.md)
 
-## Table of Contents
+**Dashboard:** [https://internal-resource-monitor.edav.cdc.gov/dashboard](https://internal-resource-monitor.edav.cdc.gov/dashboard)
 
-1. [Architecture](#architecture)
-2. [Operational Modes](#operational-modes)
-3. [Safety Controls](#safety-controls)
-4. [Governance Features](#governance-features)
-5. [Workflow](#workflow)
-6. [Installation](#installation)
-7. [Input File Format](#input-file-format)
-8. [Usage Examples](#usage-examples)
-9. [Output Reports](#output-reports)
-10. [Executive Dashboard](#executive-dashboard)
-11. [Approval Process](#approval-process)
-12. [Dry Run Process](#dry-run-process)
-13. [Cleanup Process](#cleanup-process)
-14. [Verification Process](#verification-process)
-15. [Troubleshooting](#troubleshooting)
-16. [Recovery Procedures](#recovery-procedures)
-17. [Risk Assessment](#risk-assessment)
-18. [Future Enhancements](#future-enhancements)
+Nothing is deleted without validation, approval, a change ticket, an approver, and a typed `CONFIRM`.
 
 ---
 
-## Architecture
+## What This Tool Does
 
-### Repository Structure
+The EDAV Resource Monitor Cleanup Platform transforms dashboard findings into safe, documented, owner-tracked Azure resource cleanup actions. It:
+
+- Ingests findings exported from the EDAV Resource Monitor dashboard (CSV or Excel)
+- Validates each resource against Azure to confirm current state
+- Classifies every resource as SAFE_DELETE, REVIEW_REQUIRED, DO_NOT_DELETE, UNKNOWN, or RESOURCE_NOT_FOUND
+- Detects resource ownership from Azure tags, resource group patterns, and subscription names
+- Generates executive-quality reports (CSV, Excel, HTML, JSON, Markdown)
+- Enforces 15 safety gates before any deletion
+- Creates ARM JSON backups before every deletion
+- Verifies deletions by confirming Azure returns ResourceNotFound
+- Produces owner-specific reports for team follow-up
+
+---
+
+## Repository Structure
 
 ```
 edav-private-endpoint-monitor/
-├── main.py                    # Single-file enterprise platform (v4.0.0)
-├── requirements.txt           # Python dependencies
-├── sample_input.csv           # Input file template
-├── exclusions.txt             # Endpoint exclusion list (never deleted)
-├── governance/
-│   ├── denylist.json          # Hard-blocked endpoint names
-│   └── allowlist.json         # Pre-approved safe endpoint names
-├── reports/                   # Auto-generated reports (all formats)
-├── backups/                   # ARM JSON backups (pre-delete)
-│   └── private_endpoints/     # One JSON file per deleted endpoint
-└── logs/                      # Structured run logs
-```
-
-### Architecture Diagram
-
-```mermaid
-flowchart TD
-    A([Start]) --> B[Azure Login Validation]
-    B --> C[Load Input CSV/Excel]
-    C --> D[Load Governance Files\nexclusions + denylist + allowlist]
-    D --> E[Load Terraform State]
-
-    E --> F{Mode?}
-
-    F -->|verify-only / default| G[PHASE 1: Discovery Scan]
-    G --> H[For each endpoint: Set Sub Context]
-    H --> I[az network private-endpoint show]
-    I --> J[Check Connection State]
-    J --> K[Check Backend Resource Exists]
-    K --> L[Check Terraform Ownership]
-    L --> M[Check Exclusion + Denylist]
-    M --> N[Decide: Safe Delete / Review / Excluded / Denied]
-
-    N --> O[PHASE 2: Validation Reports]
-    O --> P[Write CSV + XLSX + MD + HTML + JSON]
-
-    F -->|cleanup-approved + delete-approved| G
-
-    P --> Q{cleanup-approved?}
-    Q -->|No| Z([End: Verify-Only Complete])
-
-    Q -->|Yes| R[PHASE 3: Safety Gate]
-    R --> S{All 14 Safety Checks Pass?}
-    S -->|No| T[Block: Skipped / Excluded / Denied]
-    S -->|Yes| U{dry-run?}
-    U -->|Yes| V[Simulate Delete: Dry-Run]
-    U -->|No| W[ARM Backup JSON]
-    W --> X[Pre-Delete Re-Validation]
-    X --> Y[az network private-endpoint delete]
-
-    V --> AA[PHASE 4: Post-Delete Verification]
-    Y --> AA
-    T --> AA
-    AA --> AB[az network private-endpoint show]
-    AB --> AC{ResourceNotFound?}
-    AC -->|Yes| AD[Verified - Deletion Confirmed]
-    AC -->|No| AE[FAILED - Resource Still Exists]
-
-    AD --> AF[PHASE 5: All Reports]
-    AE --> AF
-    AF --> AG[Write Deletion + Verification Reports]
-    AG --> AH[Generate Rollback Instructions]
-    AH --> AI[PHASE 6: Executive Dashboard]
-    AI --> AJ([End: Cleanup Complete])
+├── main.py                          # Core platform engine (v5.0.0)
+├── README.md                        # This file
+├── requirements.txt                 # Python dependencies
+├── .gitignore
+│
+├── config/
+│   ├── resource_rules.yaml          # Per-resource-type validation rules
+│   ├── ownership_map.yaml           # Team/owner mapping by RG, name, subscription
+│   ├── exclusions.txt               # Resources that are NEVER deleted
+│   ├── denylist.json               # Hard-blocked names, groups, and patterns
+│   └── allowlist.json              # Pre-approved safe candidates
+│
+├── examples/
+│   ├── sample_dashboard_findings.csv  # Example dashboard export
+│   └── sample_approved_cleanup.csv    # Example approved cleanup input
+│
+├── docs/
+│   ├── architecture.md              # Architecture overview
+│   ├── workflow.md                  # Step-by-step workflow guide
+│   ├── runbook.md                   # Monthly runbook
+│   └── mermaid-diagram.md           # Architecture diagrams (Mermaid)
+│
+├── reports/                         # Auto-generated reports (git-ignored)
+├── backups/                         # ARM JSON backups (git-ignored)
+└── logs/                            # Run logs (git-ignored)
 ```
 
 ---
 
-## Operational Modes
+## Supported Azure Resource Types
 
-| Flag | Description | Deletes? | Verifies? |
-|------|-------------|----------|-----------|
-| *(default)* | Discovery + Validation + Reports | No | No |
-| `--verify-only` | Explicit safe mode: Discovery + Validation + Reports | No | No |
-| `--cleanup-approved --delete-approved --dry-run` | Full simulation, no Azure changes | No (simulated) | No (simulated) |
-| `--cleanup-approved --delete-approved` | Full pipeline: Validate + Delete + Verify | Yes | Yes |
-
-> **`--cleanup-approved` requires `--delete-approved` to be explicitly passed.**
-> This is a two-key safety requirement — both flags must be present to enable deletion.
-
----
-
-## Safety Controls
-
-The platform enforces **14 ordered safety layers** before any deletion occurs:
-
-| # | Safety Layer | Type |
+| Resource Type | Auto-Delete | Default |
 |---|---|---|
-| 1 | `--delete-approved` flag required | CLI |
-| 2 | `--cleanup-approved` mode required | CLI |
-| 3 | `ApprovedToDelete=Yes` required per row | Input file |
-| 4 | Endpoint not on **denylist** | Governance |
-| 5 | Endpoint not on **exclusions** list | Governance |
-| 6 | `Recommended Action` must not contain blocking keyword | Scan result |
-| 7 | User must type **CONFIRM** at interactive prompt | Interactive |
-| 8 | **ARM JSON backup** written before every delete | Pre-delete |
-| 9 | **Pre-delete re-validation**: endpoint exists AND still Disconnected | Pre-delete |
-| 10 | **Subscription context verified** before each delete | Pre-delete |
-| 11 | `az network private-endpoint delete` issued (ONLY delete command) | Delete |
-| 12 | **Post-delete verification**: Azure must return ResourceNotFound | Post-delete |
-| 13 | **Subscription-level error isolation**: one failed sub never blocks others | Resilience |
-| 14 | `--dry-run` simulates entire workflow without touching Azure | Override |
-
-> **The ONLY Azure delete command in this codebase is:**
-> ```
-> az network private-endpoint delete
-> ```
-> No backend resources (Key Vault, Storage, SQL, VNet, NIC, DNS, NSG, Subnet, Route Tables)
-> are ever touched.
+| Microsoft.Network/privateEndpoints | ✅ Yes | REVIEW_REQUIRED |
+| Microsoft.Network/networkInterfaces | ✅ Yes | REVIEW_REQUIRED |
+| Microsoft.Network/networkSecurityGroups | ❌ No | REVIEW_REQUIRED |
+| Microsoft.Network/publicIPAddresses | ✅ Yes | REVIEW_REQUIRED |
+| Microsoft.Compute/disks | ✅ Yes | REVIEW_REQUIRED |
+| Microsoft.Compute/virtualMachines | ❌ No | REVIEW_REQUIRED |
+| Microsoft.Storage/storageAccounts | ❌ No | REVIEW_REQUIRED |
+| Microsoft.KeyVault/vaults | ❌ No | REVIEW_REQUIRED |
+| Microsoft.ContainerRegistry/registries | ❌ No | REVIEW_REQUIRED |
+| Microsoft.EventGrid/topics | ❌ No | REVIEW_REQUIRED |
+| Microsoft.EventGrid/systemTopics | ❌ No | REVIEW_REQUIRED |
+| Microsoft.EventHub/namespaces | ❌ No | REVIEW_REQUIRED |
+| Microsoft.Sql/managedInstances | ❌ No | REVIEW_REQUIRED |
+| Microsoft.MachineLearningServices/workspaces | ❌ No | REVIEW_REQUIRED |
+| Any other type | ❌ No | UNKNOWN |
 
 ---
 
-## Governance Features
+## Classification System
 
-### Exclusion List (`exclusions.txt`)
-
-Plain-text file, one endpoint name per line. Lines starting with `#` are comments.
-Excluded endpoints are **never deleted** regardless of approval status.
-
-```
-# EDAV Exclusions - endpoints that must never be deleted
-prod-keyvault-pe
-prod-sql-pe
-# Temporarily excluded pending review
-nceh-auth-pe
-```
-
-### Denylist (`governance/denylist.json`)
-
-JSON array of endpoint names that are **hard-blocked** from deletion.
-Takes precedence over all other settings.
-
-```json
-[
-  "prod-critical-pe",
-  "shared-services-pe",
-  "platform-hub-pe"
-]
-```
-
-### Allowlist (`governance/allowlist.json`)
-
-JSON array of endpoint names that are pre-approved safe for governance tracking.
-
-```json
-[
-  "orphaned-test-pe",
-  "dev-decommissioned-pe"
-]
-```
-
-### Change Ticket Reference
-
-Pass `--change-ticket CHG0012345` to record the ITSM change request reference in every report.
-
-### Approver Identity
-
-Pass `--approved-by "John Smith"` to record the approver name in the audit trail and all reports.
+| Classification | Meaning | Action |
+|---|---|---|
+| **SAFE_DELETE** | Confirmed unused, approved, no dependencies | Delete (if all 15 safety gates pass) |
+| **REVIEW_REQUIRED** | Uncertain, has deps, or needs team confirmation | Do not delete - reach out to team |
+| **DO_NOT_DELETE** | Active, TF-managed, locked, or production | Never delete |
+| **UNKNOWN** | Cannot determine state - missing data or access issue | Investigate |
+| **RESOURCE_NOT_FOUND** | Resource no longer exists in Azure | Already gone |
+| **ACCESS_OR_SUBSCRIPTION_REVIEW** | Auth or subscription context issue blocked validation | Fix auth and re-run |
 
 ---
 
-## Workflow
+## Dashboard Workflow
 
-### Phase 1: Discovery & Scan
-For each endpoint in the input file, the platform:
-- Sets Azure subscription context
-- Calls `az network private-endpoint show`
-- Extracts Connection State, Region, Backend Resource ID
-- Checks if the backend resource still exists in Azure
-- Checks Terraform state and `.tf` source files for ownership
-- Checks exclusion list and denylist
-- Assigns a Recommended Action: Safe Delete Candidate, Excluded, Denied, Review, Investigate, etc.
+### Step 1: Export from Dashboard
 
-### Phase 2: Validation Reports
-Generates all discovery and validation reports:
-- `EDAV_Validation_Report_<ts>.xlsx` (colour-coded, multi-sheet)
-- `EDAV_Validation_Report_<ts>.csv`
-- `EDAV_Summary_<ts>.md`
-- `EDAV_Report_<ts>.html` (standalone, all phases)
-- `EDAV_Report_<ts>.json` (machine-readable)
+1. Login: [https://internal-resource-monitor.edav.cdc.gov/dashboard](https://internal-resource-monitor.edav.cdc.gov/dashboard)
+2. Navigate to **Findings**
+3. Filter: Severity = HIGH, Status = Active
+4. Export CSV → save as `inputs/findings_YYYY-MM.csv`
 
-### Phase 3: Cleanup Engine (`--cleanup-approved` only)
-Runs all 14 safety layers, then for each approved endpoint:
-1. Exports ARM JSON backup to `backups/private_endpoints/`
-2. Re-validates endpoint exists and is still Disconnected
-3. Verifies subscription context
-4. Issues `az network private-endpoint delete`
-5. Records result, duration, backup path, validation status
+### Step 2: Audit Run
 
-### Phase 4: Post-Delete Verification (NEW in v4.0.0)
-For every deletion attempt:
-- Calls `az network private-endpoint show` again
-- If `ResourceNotFound` is returned: **Verified - Resource Not Found**
-- If resource still exists: **FAILED - Resource Still Exists** (alerts operator)
-- Results written to verification CSV and XLSX reports
+```bash
+python main.py \
+  --input inputs/findings_YYYY-MM.csv \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --audit-only \
+  --output-dir reports/YYYY-MM/
+```
 
-### Phase 5: Final Reports
-HTML and JSON reports updated with deletion and verification data.
+### Step 3: Review Reports
 
-### Phase 6: Executive Dashboard
-Console summary printed showing all counts across all phases.
+Open `reports/YYYY-MM/EDAV_Findings_Report_<ts>.xlsx` and review the SAFE_DELETE sheet.
+
+### Step 4: Get Approval
+
+Share the executive summary with Linda. Get change ticket approved (CHGxxxxxxx).
+
+### Step 5: Dry Run
+
+```bash
+python main.py \
+  --input inputs/approved_YYYY-MM.csv \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --cleanup-approved \
+  --dry-run \
+  --change-ticket CHG0012345 \
+  --approved-by "Linda Johnson"
+```
+
+### Step 6: Live Cleanup
+
+```bash
+python main.py \
+  --input inputs/approved_YYYY-MM.csv \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --cleanup-approved \
+  --change-ticket CHG0012345 \
+  --approved-by "Linda Johnson" \
+  --delete-pause 3
+```
+
+Type `CONFIRM` when prompted.
+
+### Step 7: Verify
+
+Re-open the dashboard and confirm finding count has decreased.
+
+---
+
+## Approval Workflow
+
+Deletion requires ALL of these in the input file:
+
+| Field | Required Value |
+|-------|---------------|
+| ApprovedToDelete | `Yes` |
+| ApprovalTicket | e.g., `CHG0012345` |
+| ApprovedBy | e.g., `Linda Johnson` |
+
+Classification must be **SAFE_DELETE** and all 15 safety gates must pass.
+
+---
+
+## Input File Format
+
+Required columns: **ResourceName**, **ResourceGroup**
+
+Optional but recommended: Subscription, ResourceType, ApprovedToDelete, ApprovalTicket, ApprovedBy, Severity, Owner, Team, MonthlyCost, Environment
+
+The parser accepts many column name aliases. See [docs/workflow.md](docs/workflow.md) for the full alias table.
+
+---
+
+## Safety Model - 15 Gates
+
+Before any resource is deleted, all 15 gates must pass:
+
+1. `--cleanup-approved` mode required
+2. `ApprovedToDelete = Yes`
+3. ApprovalTicket populated
+4. ApprovedBy populated
+5. Classification = SAFE_DELETE
+6. Not on exclusions list (`config/exclusions.txt`)
+7. Not on denylist (`config/denylist.json`)
+8. Resource exists in Azure (re-validated just before deletion)
+9. No Azure resource lock
+10. Not Terraform-managed
+11. Not production/high environment
+12. Resource type supports auto-delete
+13. ARM JSON backup created successfully
+14. Subscription context verified
+15. User types `CONFIRM` at interactive prompt
+
+---
+
+## Execution Modes
+
+| Mode | Flag | Deletes? |
+|------|------|----------|
+| Audit Only (default) | `--audit-only` | No |
+| Dry Run | `--cleanup-approved --dry-run` | No (simulated) |
+| Live Cleanup | `--cleanup-approved` | Yes (approved only) |
+| Verify Only | `--verify-only` | No |
+| Owner Report | `--generate-owner-report` | No |
+| Self-Test | `--self-test` | No |
+
+---
+
+## Reports Generated
+
+| Report | Format | Contents |
+|--------|--------|----------|
+| Findings Report | CSV, Excel, HTML, JSON, Markdown | All resources with classification |
+| Executive Summary | Markdown, HTML | Counts by classification/type/owner/cost |
+| SAFE_DELETE Sheet | Excel tab | Confirmed safe candidates |
+| REVIEW_REQUIRED Sheet | Excel tab | Resources needing team review |
+| DO_NOT_DELETE Sheet | Excel tab | Protected resources |
+| Deletion Report | CSV, Excel | What was deleted and when |
+| Verification Report | CSV | Post-delete Azure confirmation |
+| Rollback Instructions | Markdown | How to restore deleted resources |
+| Owner/Team Report | CSV | Findings grouped by team |
 
 ---
 
@@ -248,13 +235,13 @@ Console summary printed showing all counts across all phases.
 ### Prerequisites
 
 - Python 3.8+
-- Azure CLI 2.40+ ([Install](https://aka.ms/installazurecliwindows))
-- Azure account with Reader access (Network Contributor for deletions)
+- Azure CLI 2.40+: [https://aka.ms/install-azure-cli](https://aka.ms/install-azure-cli)
+- Azure account with Reader access (Contributor for deletions)
 
 ### Setup
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/ausjones84/edav-private-endpoint-monitor
 cd edav-private-endpoint-monitor
 
@@ -263,387 +250,99 @@ pip install -r requirements.txt
 
 # Login to Azure
 az login
-# OR for remote/server sessions:
+# OR for remote sessions:
 az login --use-device-code
 
 # Verify login
 az account show
-```
 
-### Create Governance Directories
-
-```bash
-mkdir -p governance reports backups logs
-echo "[]" > governance/denylist.json
-echo "[]" > governance/allowlist.json
-touch exclusions.txt
+# Run preflight check
+python main.py --self-test
 ```
 
 ---
 
-## Input File Format
+## Ownership Detection
 
-Supported formats: `.csv`, `.xlsx`, `.xls`
+Owner and team are automatically detected from:
 
-### Required Columns
+1. **Azure tags**: `owner`, `Owner`, `EDAV_Created_By`, `EDAV_Business_POC`, `EDAV_Project_Name`, `EDAV_Center_Name`, `EDAV_Division_Name`, `application`, `team`
+2. **Resource name patterns**: defined in `config/ownership_map.yaml`
+3. **Resource group patterns**: e.g., `ocio-dav-dev` → EDAV Platform
+4. **Subscription patterns**: e.g., `OCIO-TSBDEV-C1` → EDAV Platform - Dev
+5. **CSV input fields**: Owner and Team columns from dashboard export
 
-| Column | Description |
-|--------|-------------|
-| `Endpoint Name` | Azure Private Endpoint resource name |
-| `Resource Group` | Azure Resource Group containing the endpoint |
-
-### Optional Columns
-
-| Column | Description |
-|--------|-------------|
-| `ApprovedToDelete` | Set to `Yes` to approve for deletion |
-| `Subscription` | Azure subscription name (auto-detected if blank) |
-| `Change Ticket` | ITSM reference number |
-| `Approved By` | Approver name |
-
-### Sample Input CSV
-
-```csv
-Endpoint Name,Resource Group,Subscription,ApprovedToDelete,Change Ticket,Approved By
-testwebbseries-pe,ocio-network,OCIO-TSBDEV-C1,,
-tempendpoint,ocio-network,OCIO-TSBDEV-C1,,
-OCIO-databricks-metastoredev-mysql-endpoint,ocio-network,OCIO-TSBDEV-C1,,
-nceh-ed3n-ui-dev-wa-pe,ocio-network,OCIO-TSBDEV-C1,,
-edavdrill2026-dfs-pe,ocio-network,OCIO-TSBDEV-C1,Yes,CHG0012345,John Smith
-```
-
-### Column Aliases
-
-The following column name aliases are automatically normalised:
-- `name`, `endpointname` → `Endpoint Name`
-- `rg`, `resourcegroup` → `Resource Group`
+Edit `config/ownership_map.yaml` to add your team's patterns.
 
 ---
 
-## Usage Examples
+## Terraform Detection
 
-### Safe Discovery Only (default)
+Pass `--terraform-path /path/to/your/tf/repo` to check:
+- `terraform state list` output
+- `.tf` source files for resource name references
 
-```bash
-# Scan and report -- no deletions possible
-python main.py --input sample_input.csv --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
-```
-
-### Explicit Verify-Only Mode
-
-```bash
-python main.py \
-  --input sample_input.csv \
-  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
-  --verify-only
-```
-
-### Dry-Run Cleanup Simulation
-
-```bash
-# Simulates entire cleanup workflow -- no Azure changes made
-python main.py \
-  --input approved.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --cleanup-approved \
-  --delete-approved \
-  --dry-run \
-  --change-ticket CHG0012345 \
-  --approved-by "John Smith"
-```
-
-### Live Cleanup with Post-Delete Verification
-
-```bash
-python main.py \
-  --input approved.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --cleanup-approved \
-  --delete-approved \
-  --change-ticket CHG0012345 \
-  --approved-by "John Smith" \
-  --delete-pause 5
-```
-
-### With Terraform Check
-
-```bash
-python main.py \
-  --input approved.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --cleanup-approved \
-  --delete-approved \
-  --terraform-path /path/to/terraform/repo \
-  --change-ticket CHG0012345
-```
-
-### With Email Notification
-
-```bash
-python main.py \
-  --input report.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --verify-only \
-  --email-to "team@example.com" \
-  --email-from "noreply@example.com" \
-  --smtp-server "smtp.office365.com" \
-  --smtp-port 587
-```
-
-### With Custom Governance Files
-
-```bash
-python main.py \
-  --input approved.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --cleanup-approved \
-  --delete-approved \
-  --exclusions my_exclusions.txt \
-  --denylist governance/denylist.json \
-  --allowlist governance/allowlist.json
-```
+If a resource is found in Terraform, it is classified **DO_NOT_DELETE**.
 
 ---
 
-## Output Reports
+## Rollback / Recovery
 
-| File | Format | Phase | Description |
-|------|--------|-------|-------------|
-| `EDAV_Validation_Report_<ts>.xlsx` | Excel | 1-2 | Colour-coded, multi-sheet (Summary, All Endpoints, Safe Delete Candidates, Excluded, Investigate) |
-| `EDAV_Validation_Report_<ts>.csv` | CSV | 1-2 | Full discovery data, all endpoints |
-| `EDAV_Summary_<ts>.md` | Markdown | 2 | Human-readable validation summary |
-| `EDAV_Report_<ts>.html` | HTML | All | Standalone report covering all phases |
-| `EDAV_Report_<ts>.json` | JSON | All | Machine-readable full report |
-| `EDAV_Delete_Report_<ts>.xlsx` | Excel | 3 | Colour-coded deletion log |
-| `EDAV_Delete_Report_<ts>.csv` | CSV | 3 | Full deletion log |
-| `delete_summary_<ts>.md` | Markdown | 3 | Deletion summary |
-| `EDAV_Verification_<ts>.xlsx` | Excel | 4 | Post-delete verification results |
-| `EDAV_Verification_<ts>.csv` | CSV | 4 | Verification data |
-| `rollback_instructions.md` | Markdown | 3 | Step-by-step restore guide |
-| `backups/private_endpoints/<name>_<sub>_<ts>.json` | JSON | 3 | ARM resource backup (one per endpoint) |
-| `logs/EDAV_RUN_<ts>.log` | Log | All | Full structured run log |
-
-### Report Columns
-
-**Discovery/Validation Report:**
-`Endpoint Name`, `Resource Group`, `Subscription`, `Region`, `Connection State`, `Backend Resource`, `Backend Exists`, `Terraform Managed`, `Recommended Action`, `Scan Timestamp`, `Notes`
-
-**Deletion Report:**
-`Endpoint Name`, `Resource Group`, `Subscription`, `Region`, `Recommended Action`, `ApprovedToDelete`, `Change Ticket`, `Approved By`, `Delete Result`, `Delete Timestamp`, `Duration (s)`, `Dry Run`, `Backup Path`, `Pre-Delete Validation`, `Error Message`
-
-**Verification Report:**
-`Endpoint Name`, `Resource Group`, `Subscription`, `Delete Result`, `Verification Status`, `Azure Response`, `Verification Timestamp`, `Verification Notes`
-
----
-
-## Executive Dashboard
-
-Printed to console at the end of every run:
-
-```
-========================================================================
-EXECUTIVE DASHBOARD  --  EDAV Private Endpoint Monitor v4.0.0
-========================================================================
-  Run Date       : 2026-06-13 10:30:00
-  Mode           : CLEANUP-APPROVED [LIVE]
-  Change Ticket  : CHG0012345
-------------------------------------------------------------------------
-  Total Endpoints Scanned    : 10
-  Total Disconnected         : 8
-  Total Excluded/Denied      : 1
-------------------------------------------------------------------------
-  Total Approved for Delete  : 5
-  Total Deleted              : 5
-  Total Skipped/Blocked      : 0
-  Total Failed               : 0
-------------------------------------------------------------------------
-  Total Verified (Gone)      : 5
-  Total Verification FAILED  : 0
-========================================================================
-```
-
----
-
-## Approval Process
-
-1. **Run in verify-only mode** to generate discovery reports
-2. **Review the Excel report** — open `EDAV_Validation_Report_<ts>.xlsx`
-3. **Set `ApprovedToDelete=Yes`** on rows approved for deletion
-4. **Raise a change ticket** in your ITSM system (e.g. ServiceNow CHGxxxxxxx)
-5. **Get change ticket approved** by the required approvers
-6. **Run dry-run first** with `--cleanup-approved --delete-approved --dry-run`
-7. **Review dry-run output** — confirm the right endpoints are queued
-8. **Execute live cleanup** with `--cleanup-approved --delete-approved --change-ticket CHGxxxxxxx`
-9. **Type CONFIRM** at the interactive prompt
-10. **Review verification report** — confirm all deletions verified
-
----
-
-## Dry Run Process
-
-```bash
-# Always run dry-run before any live deletion
-python main.py \
-  --input approved.csv \
-  --subscriptions "OCIO-TSBDEV-C1" \
-  --cleanup-approved \
-  --delete-approved \
-  --dry-run
-```
-
-Dry-run simulates the **entire** workflow:
-- Runs all safety gate checks
-- Shows exactly which endpoints would be deleted
-- Generates all reports (marked DRY RUN)
-- Does **not** touch any Azure resource
-- Does **not** create backups
-- Does **not** issue any delete command
-
----
-
-## Cleanup Process
-
-For each approved endpoint, the cleanup engine runs in this exact order:
-
-```
-[Safety Gate]  → Check all 14 safety layers
-[Backup]       → Export ARM JSON to backups/private_endpoints/
-[Validate]     → Re-confirm endpoint exists AND is still Disconnected
-[Context]      → Verify subscription context matches expected
-[DELETE]       → az network private-endpoint delete --name X --resource-group Y --yes
-[Verify]       → az network private-endpoint show (must return ResourceNotFound)
-[Record]       → Log result, duration, backup path, verification status
-[Pause]        → Wait --delete-pause seconds (default 2s) before next endpoint
-```
-
----
-
-## Verification Process
-
-After every deletion (new in v4.0.0):
-
-1. The platform calls `az network private-endpoint show` on the deleted endpoint
-2. If Azure returns `ResourceNotFound` (or `None`): **Verified - Resource Not Found** ✓
-3. If Azure returns the resource data: **FAILED - Resource Still Exists** ✗
-4. Verification results are written to `EDAV_Verification_<ts>.xlsx` and `.csv`
-5. The Executive Dashboard shows `Total Verified` and `Total Verification FAILED`
-6. Any verification failure triggers a console `ERROR` alert
-
-**Verification Status Values:**
-
-| Status | Meaning |
-|--------|----------|
-| `Verified - Resource Not Found` | Deletion confirmed by Azure |
-| `FAILED - Resource Still Exists` | Deletion may have failed silently -- manual review required |
-| `Verification Skipped (Dry Run)` | No real delete performed |
-| `Not Applicable` | Endpoint was skipped/excluded/failed -- no verification needed |
+If a resource needs to be restored:
+1. Check `backups/` for the ARM JSON backup
+2. Open `reports/rollback_instructions.md`
+3. Reconstruct using the ARM JSON values
+4. Service owners must re-approve any private link connections
 
 ---
 
 ## Troubleshooting
 
-### Azure Login Error
-```
-AZURE LOGIN REQUIRED
-```
-**Fix:** Run `az login` or `az login --use-device-code` and retry.
-
-### No Subscriptions Found
-```
-No Azure subscriptions found.
-```
-**Fix:** Ensure your Azure account has Reader access to at least one subscription. Use `az account list` to verify.
-
-### Endpoint Not Found
-```
-Recommended Action: Endpoint Not Found / Check Subscription
-```
-**Fix:** Verify the endpoint name and resource group in the input file. Ensure the subscription is included in `--subscriptions`.
-
-### Cannot Set Subscription
-```
-Cannot set subscription context to 'SubName'
-```
-**Fix:** Verify the subscription name is correct and your account has access. Run `az account list` to see available subscriptions.
-
-### ApprovedToDelete Not Recognised
-```
-ApprovedToDelete='' -- must be Yes / YES / yes
-```
-**Fix:** The input CSV must have a column named exactly `ApprovedToDelete` with value `Yes`. Check for trailing spaces in column headers or BOM characters.
-
-### Missing Dependencies
-```
-ERROR: Missing dependencies.
-```
-**Fix:** Run `pip install -r requirements.txt`
-
-### --cleanup-approved Requires --delete-approved
-```
---cleanup-approved requires --delete-approved to be explicitly passed.
-```
-**Fix:** Add `--delete-approved` to your command. Both flags are required for deletion.
+| Error | Fix |
+|-------|-----|
+| `AZURE LOGIN REQUIRED` | Run `az login` |
+| `Cannot set subscription context` | Run `az account list` and verify subscription name |
+| `AADSTS500173` | Token expired - run `az login` |
+| `Missing pandas/openpyxl` | Run `pip install -r requirements.txt` |
+| Classification = UNKNOWN | Check subscription access and resource type |
+| All resources = ACCESS_OR_SUBSCRIPTION_REVIEW | Re-authenticate with `az login` |
 
 ---
 
-## Recovery Procedures
+## Known Limitations
 
-### If a Deletion Fails
-
-1. Check `logs/EDAV_RUN_<ts>.log` for the error message
-2. Check `EDAV_Delete_Report_<ts>.xlsx` for `Error Message` column
-3. Re-run the same command — the pre-delete re-validation will skip already-deleted endpoints
-
-### If Verification Fails
-
-1. Check `EDAV_Verification_<ts>.xlsx` for `FAILED - Resource Still Exists` rows
-2. Manually verify in Azure Portal or with `az network private-endpoint show --name X --resource-group Y`
-3. If resource still exists, investigate whether the delete API call silently failed
-4. Escalate to Azure support if needed
-
-### How to Restore a Deleted Endpoint
-
-1. Open `reports/rollback_instructions.md`
-2. Locate the ARM JSON backup in `backups/private_endpoints/<name>_<sub>_<ts>.json`
-3. Use the ARM JSON values to reconstruct with `az network private-endpoint create`
-4. The backend service owner must re-approve the private link connection
+- **No direct dashboard API**: Tool consumes CSV/Excel exports - no live dashboard connection
+- **Azure CLI required**: Uses `az` CLI, not Azure SDK (SDK upgrade planned)
+- **Sequential processing**: Resources validated one at a time (parallel mode planned)
+- **NSG auto-delete disabled**: NSG deletion requires manual confirmation even when unattached
+- **Terraform path required**: Terraform check only works if you have the TF repo checked out locally
 
 ---
 
-## Risk Assessment
+## How to Use Monthly
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| Wrong endpoint deleted | Low | High | 14-layer safety gate, pre-delete re-validation, CONFIRM prompt |
-| Backend resource affected | Very Low | Critical | Only `az network private-endpoint delete` ever issued |
-| Delete succeeds but not verified | Low | Medium | Post-delete verification with ResourceNotFound check |
-| Subscription context mismatch | Low | High | Context verified before every delete |
-| Exclusion list bypassed | Very Low | High | Exclusion checked in scan AND in safety gate (two checkpoints) |
-| ARM backup missing | Low | Medium | Backup attempted before every delete; warning logged if ARM fetch fails |
-| One subscription failure cascades | Low | Medium | Subscription-level isolation: each sub handled independently |
+1. **Week 1**: Export from dashboard → run audit → share report with Linda
+2. **Week 1-2**: Get change ticket approved → run dry-run → review
+3. **Week 2**: Run live cleanup → verify on dashboard → send final report
+
+See [docs/runbook.md](docs/runbook.md) for the complete monthly runbook.
 
 ---
 
-## Future Enhancements
+## Architecture
 
-- Azure SDK (`azure-mgmt-network`) replacing az CLI for faster parallel scanning
-- Azure DevOps / GitHub Actions pipeline integration
-- ServiceNow / ITSM API integration for automatic change ticket creation
-- Azure Policy integration for continuous drift detection
-- Slack / Teams webhook notifications
-- Multi-tenant support
-- Interactive HTML report with sorting and filtering
-- Scheduled runs via Azure Automation or Function Apps
+See [docs/architecture.md](docs/architecture.md) for component details and [docs/mermaid-diagram.md](docs/mermaid-diagram.md) for visual flow diagrams.
 
 ---
 
-## Requirements
+## Version History
 
-```
-pandas>=2.0.0
-openpyxl>=3.1.0
-```
+| Version | Date | Changes |
+|---------|------|---------|
+| v5.0.0 | 2026-06 | Complete rewrite: multi-resource support, dashboard integration, ownership detection, 15-gate safety model, classification system, owner reports |
+| v4.0.0 | 2026-04 | Private endpoint monitor with post-delete verification |
+| v3.x | 2026-02 | Enterprise governance features |
 
 ---
 
-*EDAV Private Endpoint Monitor v4.0.0 — Enterprise Azure Governance Platform*
+*EDAV Resource Monitor Cleanup Platform v5.0.0 — Built for the EDAV Platform Team*
