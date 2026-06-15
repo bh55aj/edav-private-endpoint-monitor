@@ -1,0 +1,320 @@
+# =============================================================================
+# EDAV Resource Monitor Cleanup Platform - v5.0.0
+# config/resource_rules.yaml
+# Defines per-resource-type validation behavior, classification logic,
+# deletion safety rules, and required validation steps.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Microsoft.Network/privateEndpoints
+# ---------------------------------------------------------------------------
+Microsoft.Network/privateEndpoints:
+  display_name: "Private Endpoint"
+  auto_delete_supported: true
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when:
+    connection_state: Disconnected
+    backend_exists: false
+  review_required_when:
+    - condition: "connection_state == Disconnected AND backend_exists == true"
+    - condition: "connection_state == Unknown"
+  do_not_delete_when:
+    - terraform_managed: true
+    - has_azure_lock: true
+    - connection_state: Connected
+  validation_steps:
+    - check_connection_state
+    - get_private_link_service_id
+    - validate_backend_resource_existence
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "SAFE_DELETE only when Disconnected AND backend resource is gone."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Network/networkInterfaces
+# ---------------------------------------------------------------------------
+Microsoft.Network/networkInterfaces:
+  display_name: "Network Interface (NIC)"
+  auto_delete_supported: true
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when:
+    attached_vm: null
+    attached_pe: null
+    attached_lb: null
+    attached_appgw: null
+  do_not_delete_when:
+    - attached_vm: true
+    - attached_pe: true
+    - attached_lb: true
+    - attached_appgw: true
+    - terraform_managed: true
+    - has_azure_lock: true
+  validation_steps:
+    - check_vm_attachment
+    - check_pe_attachment
+    - check_lb_attachment
+    - check_appgw_attachment
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "SAFE_DELETE only if fully unattached. Never delete NICs owned by PE, VM, LB, or AppGW."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Network/networkSecurityGroups
+# ---------------------------------------------------------------------------
+Microsoft.Network/networkSecurityGroups:
+  display_name: "Network Security Group (NSG)"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when:
+    subnet_associations: 0
+    nic_associations: 0
+  do_not_delete_when:
+    - subnet_associations_count_gt: 0
+    - nic_associations_count_gt: 0
+    - terraform_managed: true
+    - has_azure_lock: true
+  validation_steps:
+    - check_subnet_associations
+    - check_nic_associations
+    - check_security_rules_active
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Do not auto-delete attached NSGs. REVIEW_REQUIRED if rules appear active."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Network/publicIPAddresses
+# ---------------------------------------------------------------------------
+Microsoft.Network/publicIPAddresses:
+  display_name: "Public IP Address"
+  auto_delete_supported: true
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when:
+    ip_configuration: null
+    nat_gateway: null
+  do_not_delete_when:
+    - ip_configuration: true
+    - nat_gateway: true
+    - terraform_managed: true
+    - has_azure_lock: true
+  validation_steps:
+    - check_ip_configuration_attachment
+    - check_nat_gateway
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "SAFE_DELETE only if unattached. REVIEW_REQUIRED if attached or unknown."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Compute/disks
+# ---------------------------------------------------------------------------
+Microsoft.Compute/disks:
+  display_name: "Managed Disk"
+  auto_delete_supported: true
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when:
+    managed_by: null
+    disk_state: Unattached
+  review_required_when:
+    - condition: "is_snapshot == true"
+    - condition: "backup_related == true"
+    - condition: "ownership_unclear == true"
+  do_not_delete_when:
+    - managed_by_not_null: true
+    - disk_state: Attached
+    - disk_state: Reserved
+    - terraform_managed: true
+    - has_azure_lock: true
+  validation_steps:
+    - check_managed_by
+    - check_disk_state
+    - check_snapshot_flag
+    - check_backup_tags
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "SAFE_DELETE only when managedBy is null and diskState is Unattached."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Compute/virtualMachines
+# ---------------------------------------------------------------------------
+Microsoft.Compute/virtualMachines:
+  display_name: "Virtual Machine"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when: {}
+  do_not_delete_when:
+    - power_state: running
+    - power_state: starting
+    - has_backup: true
+    - terraform_managed: true
+    - has_azure_lock: true
+    - is_production: true
+  validation_steps:
+    - check_power_state
+    - check_owner_tags
+    - check_attached_disks
+    - check_nics
+    - check_backup_configured
+    - check_monitoring_agents
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Never auto-delete VMs. Explicit approval + confirmation always required."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Storage/storageAccounts
+# ---------------------------------------------------------------------------
+Microsoft.Storage/storageAccounts:
+  display_name: "Storage Account"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when: {}
+  validation_steps:
+    - check_last_activity
+    - check_blob_containers
+    - check_file_shares
+    - check_queues
+    - check_tables
+    - check_lifecycle_policy
+    - check_diagnostic_settings_source
+    - check_private_endpoints
+    - check_network_rules
+    - check_tags_and_locks
+    - check_terraform_managed
+    - check_azure_lock
+  cost_check: true
+  notes: "Never auto-delete storage accounts. Check activity, containers, lifecycle, diagnostics, PEs."
+
+# ---------------------------------------------------------------------------
+# Microsoft.KeyVault/vaults
+# ---------------------------------------------------------------------------
+Microsoft.KeyVault/vaults:
+  display_name: "Key Vault"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  safe_delete_when: {}
+  validation_steps:
+    - check_purge_protection
+    - check_soft_delete_enabled
+    - check_secrets_count
+    - check_certificates_count
+    - check_keys_count
+    - check_private_endpoints
+    - check_access_policies
+    - check_rbac_assignments
+    - check_tags
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Never auto-delete Key Vaults. Check purge protection, soft delete, and all secret/cert/key content."
+
+# ---------------------------------------------------------------------------
+# Microsoft.ContainerRegistry/registries
+# ---------------------------------------------------------------------------
+Microsoft.ContainerRegistry/registries:
+  display_name: "Container Registry"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_repositories_count
+    - check_webhooks
+    - check_geo_replication
+    - check_private_endpoints
+    - check_tags
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "REVIEW_REQUIRED. Check repos, webhooks, and active image pulls before any action."
+
+# ---------------------------------------------------------------------------
+# Microsoft.EventGrid/topics
+# ---------------------------------------------------------------------------
+Microsoft.EventGrid/topics:
+  display_name: "Event Grid Topic"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_event_subscriptions
+    - check_private_endpoints
+    - check_delivery_metrics
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "REVIEW_REQUIRED. Check all event subscriptions before any action."
+
+# ---------------------------------------------------------------------------
+# Microsoft.EventGrid/systemTopics
+# ---------------------------------------------------------------------------
+Microsoft.EventGrid/systemTopics:
+  display_name: "Event Grid System Topic"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_event_subscriptions
+    - check_source_resource_exists
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "REVIEW_REQUIRED. Validate source resource exists and all subscriptions are gone."
+
+# ---------------------------------------------------------------------------
+# Microsoft.EventHub/namespaces
+# ---------------------------------------------------------------------------
+Microsoft.EventHub/namespaces:
+  display_name: "Event Hub Namespace"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_event_hubs_count
+    - check_consumer_groups
+    - check_message_retention_days
+    - check_private_endpoints
+    - check_capture_enabled
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "REVIEW_REQUIRED. Check active event hubs, consumer groups, and message retention."
+
+# ---------------------------------------------------------------------------
+# Microsoft.Sql/managedInstances
+# ---------------------------------------------------------------------------
+Microsoft.Sql/managedInstances:
+  display_name: "SQL Managed Instance"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_databases_count
+    - check_backup_retention_policy
+    - check_private_endpoints
+    - check_active_connections
+    - check_failover_group
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Never auto-delete. Requires DBA approval and team lead sign-off."
+
+# ---------------------------------------------------------------------------
+# Microsoft.MachineLearningServices/workspaces
+# ---------------------------------------------------------------------------
+Microsoft.MachineLearningServices/workspaces:
+  display_name: "Azure ML Workspace"
+  auto_delete_supported: false
+  default_classification: REVIEW_REQUIRED
+  validation_steps:
+    - check_compute_clusters
+    - check_compute_instances
+    - check_datasets
+    - check_experiments
+    - check_endpoints
+    - check_pipelines
+    - check_private_endpoints
+    - check_linked_storage
+    - check_linked_key_vault
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Never auto-delete AML workspaces. Check all compute, datasets, experiments, and pipelines first."
+
+# ---------------------------------------------------------------------------
+# Fallback for unknown/unsupported resource types
+# ---------------------------------------------------------------------------
+DEFAULT:
+  display_name: "Unknown Resource Type"
+  auto_delete_supported: false
+  default_classification: UNKNOWN
+  validation_steps:
+    - check_resource_exists
+    - check_tags
+    - check_terraform_managed
+    - check_azure_lock
+  notes: "Unsupported resource type. Manual review required. Escalate to platform team."
