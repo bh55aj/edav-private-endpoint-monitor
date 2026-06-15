@@ -1,31 +1,72 @@
+# EDAV Resource Monitor Cleanup Platform - .gitignore
+
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-.venv/
+*$py.class
+*.so
+.Python
 venv/
 env/
+.venv/
+*.egg-info/
+dist/
+build/
 
-# Reports output (keep folder, ignore generated files)
-reports/*.xlsx
-reports/*.csv
-reports/*.md
-
-# Input data files (never commit endpoint lists with infrastructure details)
-*.csv
-*.xlsx
-*.xls
-!sample_input.csv
-
-# Environment / secrets
+# Environment
 .env
+.env.*
 *.env
-
-# OS
-.DS_Store
-Thumbs.db
 
 # IDE
 .vscode/
 .idea/
 *.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================================
+# Tool output directories - these are generated at runtime
+# Keep .gitkeep files to preserve directory structure
+# ============================================================================
+
+# Reports directory - keep the directory but ignore output files
+reports/
+!reports/.gitkeep
+!reports/.gitignore
+
+# Backups directory - ARM JSON backups contain resource config data
+backups/
+!backups/.gitkeep
+!backups/.gitignore
+
+# Logs directory
+logs/
+!logs/.gitkeep
+!logs/.gitignore
+
+# Input files directory (contains potentially sensitive resource data)
+inputs/
+
+# ============================================================================
+# Governance files with potential secrets
+# ============================================================================
+# Keep tracked versions, but ignore local overrides
+*.local.json
+*.local.yaml
+*.local.txt
+
+# Email config (may contain credentials)
+email_config.json
+smtp_config.json
+
+# Azure credentials (should never be committed)
+*.pem
+*.p12
+*.pfx
+azure_credentials.json
+service_principal.json
