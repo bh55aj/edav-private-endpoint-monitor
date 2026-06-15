@@ -1,0 +1,46 @@
+# =============================================================================
+# EDAV Resource Monitor Cleanup Platform - v5.0.0
+# config/exclusions.txt
+# Resources listed here are NEVER deleted, regardless of approval status.
+# One resource name per line. Lines starting with # are comments.
+# =============================================================================
+
+# PRODUCTION - Critical Infrastructure (NEVER DELETE)
+prod-keyvault-pe
+prod-sql-pe
+prod-storage-pe
+prod-aml-pe
+prod-acr-pe
+prod-eventhub-pe
+shared-services-pe
+platform-hub-pe
+ocio-shared-kv-pe
+ocio-platform-sql-pe
+
+# HIGH ENVIRONMENT
+edav-high-keyvault-pe
+edav-high-sql-pe
+edav-high-storage-pe
+edav-prd-high-internal-pe
+
+# DISASTER RECOVERY
+edav-dr-keyvault-pe
+edav-dr-sql-pe
+edav-dr-storage-pe
+edavdrdrill2026-dfs-pe
+edavdrdrill2026-blob-pe
+
+# NETWORK INFRASTRUCTURE
+ocio-network-hub-pe
+ocio-core-dns-pe
+
+# AML WORKSPACES
+edav-aml-workspace-pe
+edav-ml-storage-pe
+edav-ml-kv-pe
+
+# TEMPORARILY EXCLUDED (add date and ticket reference)
+# Format: resource-name  # EXCLUDE UNTIL: YYYY-MM-DD | Ticket: CHG-XXXXX | Reason
+# nceh-auth-pe  # EXCLUDE UNTIL: 2026-09-01 | Ticket: CHG-12345 | Pending migration
+
+# ADD SITE-SPECIFIC EXCLUSIONS BELOW:
