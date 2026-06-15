@@ -1,13 +1,32 @@
-# EDAV Private Endpoint Monitor v4.0.0 - Python Dependencies
-# Install with: pip install -r requirements.txt
+# EDAV Resource Monitor Cleanup Platform - v5.0.0
+# Python dependencies
 
-# Azure CLI must be installed separately:
-# https://aka.ms/installazurecliwindows
-
-# Data processing and Excel report generation
+# Core data processing
 pandas>=2.0.0
 openpyxl>=3.1.0
 
-# HTML/JSON reports use Python stdlib only (no extra packages needed)
-# Email notifications use Python stdlib smtplib (no extra packages needed)
-# Terraform checks use subprocess (no extra packages needed)
+# YAML config support
+pyyaml>=6.0.0
+
+# HTML report generation
+jinja2>=3.1.0
+
+# Colored console output
+colorama>=0.4.6
+
+# Excel formatting (for color-coded reports)
+xlsxwriter>=3.1.0
+
+# Optional: for enhanced date parsing in input files
+python-dateutil>=2.8.2
+
+# Optional: for email notifications
+# smtplib is built-in; no extra package needed
+
+# Optional: for Azure SDK (future enhancement - currently uses az CLI)
+# azure-mgmt-resource>=23.0.0
+# azure-mgmt-compute>=30.0.0
+# azure-mgmt-network>=25.0.0
+# azure-mgmt-storage>=21.0.0
+# azure-mgmt-keyvault>=10.0.0
+# azure-identity>=1.15.0
