@@ -1,0 +1,25 @@
+{
+  "_comment": "EDAV Resource Monitor Cleanup Platform - Allowlist v5.0.0",
+  "_description": "Resources pre-approved as safe candidates. Still requires ApprovedToDelete=Yes in CSV.",
+  "pre_approved_candidates": [
+    "orphaned-test-pe",
+    "dev-decommissioned-pe",
+    "temp-dev-pe-01",
+    "temp-dev-pe-02",
+    "old-dev-storage-pe",
+    "decommissioned-sql-pe"
+  ],
+  "safe_resource_groups": [
+    "temp-dev-rg",
+    "sandbox-cleanup-rg",
+    "decommissioned-resources-rg"
+  ],
+  "safe_name_patterns": [
+    "temp-*",
+    "tmp-*",
+    "test-orphan-*",
+    "decommissioned-*",
+    "old-dev-*"
+  ],
+  "notes": "Resources here are known safe candidates. Still require manual approval in input CSV."
+}
