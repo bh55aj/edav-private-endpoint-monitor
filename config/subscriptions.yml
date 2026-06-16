@@ -1,0 +1,35 @@
+# =============================================================================
+# EDAV Azure Resource Monitor - Phase 1
+# config/subscriptions.yml
+# Defines Azure subscriptions to scan with environment classification.
+# Used by main.py when --subscriptions is not passed on the CLI.
+# =============================================================================
+
+subscriptions:
+
+  - name: "OCIO-TSBDEV-C1"
+    environment: dev
+    enabled: true
+    description: "OCIO EDAV Development Subscription"
+    owner_team: "EDAV Platform"
+    contact: "edav-platform@cdc.gov"
+
+  - name: "OCIO-TSBTST-C1"
+    environment: test
+    enabled: true
+    description: "OCIO EDAV Test Subscription"
+    owner_team: "EDAV Platform"
+    contact: "edav-platform@cdc.gov"
+
+  - name: "OCIO-TSBPRD-C1"
+    environment: production
+    enabled: true
+    description: "OCIO EDAV Production Subscription"
+    owner_team: "EDAV Platform"
+    contact: "edav-platform@cdc.gov"
+
+scan_settings:
+  az_timeout: 60
+  page_size: 1000
+  subscription_switch_pause: 1
+  skip_inaccessible: true
