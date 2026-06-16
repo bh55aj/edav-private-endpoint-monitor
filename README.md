@@ -1,4 +1,213 @@
-# EDAV Azure Resource Governance and Cost Optimization Platform
+# EDAV Azure Resource Monitor and Cost Optimization Platform
+
+**v6.0.0 — Phase 1 Modular Architecture**
+
+Enterprise Azure resource cleanup, ownership mapping, cost optimization, and Terraform drift detection.  
+Built on the EDAV Private Endpoint Monitor — expanded service by service.
+
+---
+
+## Quick Start
+
+### Install
+
+```bash
+git clone https://github.com/ausjones84/edav-private-endpoint-monitor
+cd edav-private-endpoint-monitor
+pip install -r requirements.txt
+```
+
+### Azure Login
+
+```bash
+az login
+az account show    # Verify you are in the correct tenant
+```
+
+> **SU Account Requirement:** For delete operations in production subscriptions, use an elevated  
+> SU (Service User / Privileged) account with Contributor role or higher.
+
+---
+
+## Phase 1 CLI Usage
+
+### Report Mode (Validation + Reports)
+
+```bash
+# Private endpoints report with Terraform drift
+python main.py \
+  --mode report \
+  --resource-type private-endpoints \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --terraform-path "C:\\Users\\bh55\\terraform-scripts" \
+  --output-dir reports/
+
+# Storage accounts discovery
+python main.py \
+  --mode report \
+  --resource-type storage \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
+
+# All resource types
+python main.py \
+  --mode report \
+  --resource-type all \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
+```
+
+### Delete Mode (Approval-Gated)
+
+```bash
+# Dry run first — always
+python main.py \
+  --mode delete \
+  --resource-type private-endpoints \
+  --input examples/approved_june2026.xlsx \
+  --delete-approved \
+  --dry-run
+
+# Live delete (requires CONFIRM prompt)
+python main.py \
+  --mode delete \
+  --resource-type private-endpoints \
+  --input examples/approved_june2026.xlsx \
+  --delete-approved \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
+```
+
+> **Safety:** Deletion NEVER runs unless ALL of these are true:
+> - `--delete-approved` flag passed
+> - `ApprovedToDelete = Yes` in every row
+> - `ApprovalTicket` populated
+> - `ApprovedBy` populated  
+> - `--dry-run` is NOT passed
+> - Resource type is `private-endpoints`
+> - You type `CONFIRM` at the interactive prompt
+
+---
+
+## Phase 1 Project Structure
+
+```
+edav-resource-monitor/
+  main.py                         # Entry point — Phase 1 modular + legacy
+  config/
+    subscriptions.yml             # Azure subscriptions to scan
+    owners.yml                    # Team ownership mapping
+    monitor_rules.yml             # Monitor settings and risk scoring rules
+    ownership_map.yaml            # Detailed RG/name pattern ownership
+    resource_rules.yaml           # Per-resource-type validation rules
+    exclusions.txt                # Resources excluded from cleanup
+    denylist.json                 # Resources blocked from deletion
+    allowlist.json                # Pre-approved cleanup candidates
+  monitors/
+    __init__.py
+    base_monitor.py               # Abstract base class for all monitors
+    private_endpoints.py          # PE monitor with risk scoring & rollback
+    storage_accounts.py           # Storage monitor (Phase 1 discovery)
+    terraform_drift.py            # Terraform drift monitor
+    storage_monitor.py            # Full storage activity/cost monitor
+    [additional monitors...]
+  engines/
+    terraform_drift.py            # Full TF drift detection engine
+    ownership_engine.py           # Ownership discovery engine
+    cost_optimizer.py             # Cost optimization engine
+  reports/                        # Output reports directory
+  team_reports/                   # Per-team Excel reports
+  logs/                           # Run and delete logs
+  backups/                        # ARM JSON backups before deletion
+  docs/
+    RUNBOOK.md                    # Operational runbook
+    CHANGE_REQUEST_TEMPLATE.md    # Change ticket template
+    runbook.md                    # Monthly operations runbook
+    architecture.md               # Architecture docs
+```
+
+---
+
+## Ownership Mapping
+
+Edit `config/owners.yml` to map resource groups to teams:
+
+```yaml
+owners:
+  ocio-network:
+    team: Networking Team
+    contact: TBD
+    scrum_master: TBD
+    rg_patterns:
+      - "ocio-network*"
+    name_patterns:
+      - "edav-nsg-*"
+```
+
+The tool automatically assigns ownership to every discovered resource using:
+1. Azure resource tags (owner, EDAV_Business_POC, etc.)
+2. Resource group name patterns (`config/owners.yml`)
+3. Resource name patterns
+4. Subscription patterns
+
+---
+
+## Team Report Workflow
+
+After running report mode, team-specific Excel reports are generated in `team_reports/`:
+
+- `team_reports/networking_team_private_endpoints_<ts>.xlsx`
+- `team_reports/edav_platform_team_private_endpoints_<ts>.xlsx`
+- `team_reports/databricks_analytics_team_private_endpoints_<ts>.xlsx`
+
+Each report includes: Endpoint Name, Resource Group, Subscription, Connection State,  
+Private Link Resource ID, Recommended Action, Risk Level, Owner Team, Contact, Approval Status.
+
+Send team reports to the contacts in `config/owners.yml`.  
+Teams return with `ApprovedToDelete=Yes`, ticket, and approver filled in.
+
+---
+
+## Change Request Workflow
+
+See `docs/CHANGE_REQUEST_TEMPLATE.md` for the ServiceNow change ticket template.
+
+Steps:
+1. Run report mode → review SAFE_DELETE candidates
+2. Distribute team reports → collect approvals
+3. Create ITSM change ticket using the template
+4. Run dry-run deletion → review output
+5. Run live deletion → confirm with CONFIRM
+6. Post-delete verification run
+7. Update ticket with evidence paths
+
+---
+
+## Rollback Workflow
+
+Every deletion creates an ARM JSON backup in `backups/`. To rollback:
+
+```bash
+# Find the backup
+ls backups/privateEndpoints/
+
+# Reconstruct from backup
+az network private-endpoint create \
+  --name <name> \
+  --resource-group <rg> \
+  --private-connection-resource-id <backend-id> \
+  --connection-name <name>-conn
+```
+
+---
+
+## Risk Scoring
+
+| Level | Criteria |
+|-------|----------|
+| Low | Disconnected + no backend + not Terraform-managed |
+| Medium | Disconnected + backend still exists OR owner unknown |
+| High | Production subscription + Terraform-managed + backend exists + unclear ownership |
+
+---
+
 
 **v6.0.0** — Enterprise Azure governance, cost-reduction, ownership tracking, and safe cleanup platform for the EDAV Platform Team at CDC.
 
