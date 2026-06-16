@@ -1,0 +1,108 @@
+# =============================================================================
+# EDAV Azure Resource Monitor - Phase 1
+# config/owners.yml
+# Team ownership mapping by resource group, subscription, and naming pattern.
+# =============================================================================
+
+owners:
+
+  ocio-network:
+    team: Networking Team
+    contact: TBD
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBDEV-C1
+      - OCIO-TSBPRD-C1
+    rg_patterns:
+      - "ocio-network*"
+      - "network-*"
+    name_patterns:
+      - "edav-nsg-*"
+      - "edav-pip-*"
+      - "edav-nic-*"
+      - "edav-vnet-*"
+
+  ocio-dav-prd:
+    team: Databricks / Analytics Team
+    contact: TBD
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBPRD-C1
+    rg_patterns:
+      - "ocio-dav-*"
+      - "ocio-edav-analytics-*"
+    name_patterns:
+      - "edav-aml*"
+      - "edav-ml-*"
+
+  ocio-edav-tst-high-internal-rg:
+    team: Internal Test Team
+    contact: TBD
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBTST-C1
+    rg_patterns:
+      - "ocio-edav-tst-high-internal-rg"
+      - "ocio-edav-tst*"
+    name_patterns:
+      - "test-*"
+      - "edavtest*"
+
+  ocio-edav-prd:
+    team: EDAV Platform Team
+    contact: edav-platform@cdc.gov
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBPRD-C1
+      - OCIO-TSBDEV-C1
+    rg_patterns:
+      - "ocio-edav-prd*"
+      - "ocio-edav-dev*"
+      - "ocio-edav-*"
+    name_patterns:
+      - "*-pe"
+      - "*-private-endpoint"
+      - "*-pep"
+      - "edav-kv-*"
+
+  ocio-edav-storage:
+    team: EDAV Storage Team
+    contact: edav-storage@cdc.gov
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBPRD-C1
+    rg_patterns:
+      - "ocio-edav-storage-*"
+      - "edav-datalake-*"
+    name_patterns:
+      - "edavsa*"
+      - "edavstorage*"
+      - "*datalake*"
+
+  ocio-security:
+    team: Security Team
+    contact: security-team@cdc.gov
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBPRD-C1
+    rg_patterns:
+      - "ocio-security-*"
+    name_patterns:
+      - "*-keyvault-*"
+
+  ocio-dr-bcp:
+    team: DR/BCP Team
+    contact: dr-bcp@cdc.gov
+    scrum_master: TBD
+    subscriptions:
+      - OCIO-TSBPRD-C1
+    rg_patterns:
+      - "*-dr-*"
+    name_patterns:
+      - "edavdrdrill2026*"
+      - "edav-dr-*"
+
+default_owner:
+  team: UNKNOWN - Needs Owner Assignment
+  contact: edav-platform@cdc.gov
+  scrum_master: TBD
