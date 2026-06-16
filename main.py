@@ -1774,13 +1774,13 @@ example usage:
 
 
 def main():
-    """Entry point."""
-    parser = build_arg_parser()
+    """Entry point - supports both Phase 1 modular CLI and legacy CLI."""
+    # Use Phase 1 parser (superset of legacy - includes --mode, --resource-type, etc.)
+    parser = build_phase1_arg_parser()
     args = parser.parse_args()
 
     # Override config paths if provided
     if getattr(args, "exclusions", None) and Path(args.exclusions).exists():
-        # Will be picked up by ConfigLoader with custom path logic
         os.environ["EDAV_EXCLUSIONS_PATH"] = args.exclusions
     if getattr(args, "denylist", None) and Path(args.denylist).exists():
         os.environ["EDAV_DENYLIST_PATH"] = args.denylist
@@ -1797,7 +1797,317 @@ def main():
             cprint("\nSome preflight checks failed. See above.", Fore.RED)
             sys.exit(1)
 
-    run_pipeline(args)
+    # Phase 1 mode routing
+    mode = getattr(args, "mode", None)
+    has_input = getattr(args, "input", None)
+    audit_only = getattr(args, "audit_only", False)
+    cleanup_approved = getattr(args, "cleanup_approved", False)
+
+    if mode in ("report", "delete"):
+        # Phase 1 modular pipeline
+        run_phase1_pipeline(args)
+    elif has_input or audit_only or cleanup_approved:
+        # Legacy pipeline (backward compatible)
+        run_pipeline(args)
+    else:
+        # Default: show help
+        parser.print_help()
+        sys.exit(0)
+
+
+
+# ============================================================================
+# PHASE 1 MODULAR PIPELINE - CLI ADDITIONS
+# ============================================================================
+
+def build_phase1_arg_parser():
+    """Phase 1 modular CLI argument parser."""
+    p = argparse.ArgumentParser(
+        prog='main.py',
+        description=TOOL_NAME + ' v' + VERSION + ' - Phase 1 Modular Resource Monitor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+example usage:
+
+  # Report mode - private endpoints with Terraform drift
+  python main.py --mode report --resource-type private-endpoints \\
+    --subscriptions \"OCIO-TSBDEV-C1,OCIO-TSBPRD-C1\" \\
+    --terraform-path \"/path/to/terraform\"
+
+  # Report mode - all resource types
+  python main.py --mode report --resource-type all \\
+    --subscriptions \"OCIO-TSBDEV-C1,OCIO-TSBPRD-C1\"
+
+  # Delete mode (approval-gated)
+  python main.py --mode delete --resource-type private-endpoints \\
+    --input approvals.xlsx --delete-approved
+
+  # Legacy audit mode (unchanged)
+  python main.py --input findings.csv --audit-only
+"""
+    )
+    p.add_argument('--mode', choices=['report', 'delete'], default=None,
+                   help="Operation mode: 'report' generates reports, 'delete' performs approval-gated cleanup")
+    p.add_argument('--resource-type', dest='resource_type',
+                   choices=['private-endpoints', 'storage', 'all'],
+                   default='private-endpoints',
+                   help='Resource type(s) to scan (default: private-endpoints)')
+    p.add_argument('--subscriptions', default='',
+                   help='Comma-separated Azure subscription names')
+    p.add_argument('--terraform-path', dest='terraform_path', default=None,
+                   help='Path to Terraform workspace for drift detection')
+    p.add_argument('--owners-file', dest='owners_file',
+                   default='config/owners.yml',
+                   help='Path to owners.yml (default: config/owners.yml)')
+    p.add_argument('--input', '-i', default=None,
+                   help='Input file: findings CSV/XLSX for report mode, approved file for delete mode')
+    p.add_argument('--output-dir', '-o', dest='output_dir', default='reports',
+                   help='Directory for output reports (default: reports/)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Simulate all actions without modifying Azure resources')
+    p.add_argument('--delete-approved', action='store_true',
+                   help='Enable deletion of ApprovedToDelete=Yes resources (requires --mode delete)')
+    p.add_argument('--config-dir', dest='config_dir', default='config',
+                   help='Config directory (default: config/)')
+    p.add_argument('--change-ticket', default='',
+                   help='ITSM change ticket reference')
+    p.add_argument('--approved-by', default='',
+                   help='Name of the approver')
+    p.add_argument('--audit-only', action='store_true',
+                   help='Audit-only mode (legacy flag - same as --mode report)')
+    p.add_argument('--cleanup-approved', action='store_true',
+                   help='Cleanup mode (legacy flag - same as --mode delete --delete-approved)')
+    p.add_argument('--self-test', action='store_true',
+                   help='Run preflight checks only')
+    p.add_argument('--delete-pause', type=int, default=2,
+                   help='Pause between deletions (seconds)')
+    p.add_argument('--verify-only', action='store_true',
+                   help='Verify previously deleted resources')
+    p.add_argument('--generate-owner-report', action='store_true',
+                   help='Generate owner/team reports')
+    return p
+
+
+def _load_owners_config(owners_file):
+    """Load owners.yml. Falls back to ownership_map.yaml."""
+    if yaml is None:
+        return {}
+    paths_to_try = [owners_file, 'config/owners.yml', 'config/ownership_map.yaml']
+    for path in paths_to_try:
+        p = Path(path)
+        if p.exists():
+            try:
+                with open(p) as f:
+                    data = yaml.safe_load(f) or {}
+                cprint('  Loaded owners config: ' + str(path), Fore.GREEN)
+                return data
+            except Exception as e:
+                cprint('  [WARN] Could not load ' + str(path) + ': ' + str(e), Fore.YELLOW)
+    cprint('  [WARN] No owners config found. Ownership will be UNKNOWN.', Fore.YELLOW)
+    return {}
+
+
+def _load_subscriptions_config(config_dir):
+    """Load subscriptions from config/subscriptions.yml."""
+    if yaml is None:
+        return []
+    path = Path(config_dir) / 'subscriptions.yml'
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        subs = [s['name'] for s in data.get('subscriptions', []) if s.get('enabled', True)]
+        cprint('  Loaded ' + str(len(subs)) + ' subscription(s) from subscriptions.yml', Fore.GREEN)
+        return subs
+    except Exception as e:
+        cprint('  [WARN] Could not load subscriptions.yml: ' + str(e), Fore.YELLOW)
+        return []
+
+
+def _generate_team_reports(results, output_dir, timestamp):
+    """Generate per-team Excel reports in team_reports/."""
+    if not (pd and openpyxl):
+        cprint('  [WARN] pandas/openpyxl required for team reports. Skipping.', Fore.YELLOW)
+        return
+    team_reports_dir = Path('team_reports')
+    team_reports_dir.mkdir(parents=True, exist_ok=True)
+    teams = {}
+    for r in results:
+        team = r.get('detected_team') or r.get('team') or 'UNKNOWN'
+        teams.setdefault(team, []).append(r)
+    for team, team_results in teams.items():
+        safe_team = re.sub(r'[^a-zA-Z0-9_]', '_', team).lower()
+        filename = team_reports_dir / (safe_team + '_private_endpoints_' + timestamp + '.xlsx')
+        try:
+            df = pd.DataFrame(team_results)
+            desired_cols = [
+                'resourcename', 'resourcegroup', 'subscription', 'resourcetype',
+                'connection_state', 'backend_exists', 'classification',
+                'classification_reason', 'detected_owner', 'detected_team',
+                'terraform_managed', 'approvedtodelete', 'approvalticket',
+                'approvedby', 'validation_notes', 'notes',
+            ]
+            cols = [c for c in desired_cols if c in df.columns]
+            df_out = df[cols] if cols else df
+            with pd.ExcelWriter(str(filename), engine='openpyxl') as writer:
+                df_out.to_excel(writer, sheet_name='Findings', index=False)
+            cprint('  Team report: ' + str(filename), Fore.GREEN)
+        except Exception as e:
+            cprint('  [WARN] Team report failed for ' + team + ': ' + str(e), Fore.YELLOW)
+
+
+def _generate_executive_summary(results, run_meta, output_dir):
+    """Generate reports/executive_summary.md."""
+    ensure_dirs(output_dir)
+    path = Path(output_dir) / 'executive_summary.md'
+    total = len(results)
+    by_class = {}
+    by_team = {}
+    for r in results:
+        cls = r.get('classification', CLASS_UNKNOWN)
+        by_class[cls] = by_class.get(cls, 0) + 1
+        team = r.get('detected_team') or r.get('team') or 'UNKNOWN'
+        by_team[team] = by_team.get(team, 0) + 1
+    run_date = run_meta.get('run_date', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    lines = [
+        '# EDAV Azure Resource Monitor - Executive Summary',
+        '',
+        '**Run Timestamp:** ' + run_date,
+        '**Resource Type:** ' + run_meta.get('resource_type', 'all'),
+        '**Mode:** ' + run_meta.get('mode', 'report'),
+        '**Subscriptions:** ' + run_meta.get('subscriptions', 'N/A'),
+        '',
+        '## Summary Counts',
+        '',
+        '| Metric | Count |',
+        '|--------|-------|',
+        '| Total Resources Scanned | ' + str(total) + ' |',
+        '| SAFE_DELETE (Cleanup Candidates) | ' + str(by_class.get(CLASS_SAFE_DELETE, 0)) + ' |',
+        '| REVIEW_REQUIRED (Owner Review) | ' + str(by_class.get(CLASS_REVIEW_REQUIRED, 0)) + ' |',
+        '| DO_NOT_DELETE (Blocked) | ' + str(by_class.get(CLASS_DO_NOT_DELETE, 0)) + ' |',
+        '| ACCESS_OR_SUBSCRIPTION_REVIEW | ' + str(by_class.get(CLASS_ACCESS_REVIEW, 0)) + ' |',
+        '| RESOURCE_NOT_FOUND (Already Gone) | ' + str(by_class.get(CLASS_NOT_FOUND, 0)) + ' |',
+        '| UNKNOWN | ' + str(by_class.get(CLASS_UNKNOWN, 0)) + ' |',
+        '',
+        '## Team Breakdown',
+        '',
+        '| Team | Resources |',
+        '|------|-----------|',
+    ]
+    for team, count in sorted(by_team.items(), key=lambda x: -x[1]):
+        lines.append('| ' + team + ' | ' + str(count) + ' |')
+    lines += [
+        '',
+        '## Recommended Next Actions',
+        '',
+        '1. Review REVIEW_REQUIRED resources with team leads',
+        '2. Collect approvals from teams (ApprovedToDelete=Yes, ticket, approver)',
+        '3. Create ITSM change ticket',
+        '4. Dry-run: python main.py --mode delete --dry-run --delete-approved --input approvals.xlsx',
+        '5. Live delete after dry-run review',
+        '6. Post-delete verification: run report mode again',
+    ]
+    try:
+        with open(path, 'w') as f:
+            f.write('\n'.join(lines))
+        cprint('  Executive summary: ' + str(path), Fore.GREEN)
+    except Exception as e:
+        cprint('  [WARN] Executive summary failed: ' + str(e), Fore.YELLOW)
+    return str(path)
+
+
+def run_phase1_pipeline(args):
+    """
+    Phase 1 modular pipeline entry point.
+    Supports --mode report/delete, --resource-type, --subscriptions, --terraform-path.
+    """
+    run_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp_str = ts()
+    mode = getattr(args, 'mode', 'report') or 'report'
+    resource_type = getattr(args, 'resource_type', 'private-endpoints') or 'private-endpoints'
+    output_dir = getattr(args, 'output_dir', 'reports')
+    dry_run = getattr(args, 'dry_run', False)
+    delete_approved = getattr(args, 'delete_approved', False)
+    subscriptions_arg = getattr(args, 'subscriptions', '') or ''
+    terraform_path = getattr(args, 'terraform_path', None)
+    owners_file = getattr(args, 'owners_file', 'config/owners.yml')
+    config_dir = getattr(args, 'config_dir', 'config')
+    change_ticket = getattr(args, 'change_ticket', '') or ''
+    approved_by = getattr(args, 'approved_by', '') or ''
+
+    ensure_dirs(output_dir, 'team_reports', 'logs', 'backups')
+
+    sep = '=' * 72
+    cprint('\n' + sep, Fore.CYAN, bold=True)
+    cprint('  ' + TOOL_NAME + ' v' + VERSION + ' - Phase 1 Modular Pipeline', Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+    cprint('  Mode: ' + mode.upper() + ' | Resource Type: ' + resource_type, Fore.CYAN)
+    cprint('  Date: ' + run_date, Fore.CYAN)
+    if dry_run:
+        cprint('  [DRY RUN] No Azure resources will be modified.', Fore.YELLOW, bold=True)
+
+    # Resolve subscriptions
+    subscriptions = [s.strip() for s in subscriptions_arg.split(',') if s.strip()]
+    if not subscriptions:
+        subscriptions = _load_subscriptions_config(config_dir)
+    if subscriptions:
+        cprint('  Subscriptions: ' + ', '.join(subscriptions), Fore.CYAN)
+
+    # Report mode
+    if mode == 'report':
+        input_file = getattr(args, 'input', None)
+        if input_file and Path(input_file).exists():
+            args.audit_only = True
+            args.cleanup_approved = False
+            if subscriptions:
+                args.subscriptions = ','.join(subscriptions)
+            run_pipeline(args)
+            # After run_pipeline, generate team reports and summary from the results
+            # Note: run_pipeline handles its own report generation
+            run_meta = {
+                'run_date': run_date, 'mode': mode,
+                'resource_type': resource_type,
+                'subscriptions': subscriptions_arg or ', '.join(subscriptions),
+            }
+            _generate_executive_summary([], run_meta, output_dir)
+        else:
+            cprint('', Fore.CYAN)
+            cprint('  No --input file provided for report mode.', Fore.YELLOW)
+            cprint('  To scan resources:', Fore.YELLOW)
+            cprint('    1. Export findings from EDAV dashboard', Fore.YELLOW)
+            cprint('    2. Pass as: python main.py --mode report --input findings.csv', Fore.YELLOW)
+            run_meta = {
+                'run_date': run_date, 'mode': mode,
+                'resource_type': resource_type,
+                'subscriptions': subscriptions_arg or ', '.join(subscriptions),
+            }
+            _generate_executive_summary([], run_meta, output_dir)
+
+    # Delete mode
+    elif mode == 'delete':
+        if not delete_approved:
+            cprint('\n[ERROR] --mode delete requires --delete-approved flag.', Fore.RED, bold=True)
+            cprint('  Safety rule: Deletion NEVER runs without --delete-approved.', Fore.RED)
+            sys.exit(1)
+        input_file = getattr(args, 'input', None)
+        if not input_file:
+            cprint('\n[ERROR] --mode delete requires --input <approvals.xlsx>', Fore.RED, bold=True)
+            sys.exit(1)
+        if resource_type not in ('private-endpoints',):
+            cprint('\n[ERROR] --mode delete only supports --resource-type private-endpoints', Fore.RED, bold=True)
+            cprint('  Storage and other types require manual review and are blocked for deletion.', Fore.RED)
+            sys.exit(1)
+        args.cleanup_approved = True
+        args.audit_only = False
+        if subscriptions:
+            args.subscriptions = ','.join(subscriptions)
+        if terraform_path:
+            args.terraform_path = terraform_path
+        run_pipeline(args)
+    else:
+        cprint('[ERROR] Unknown mode: ' + str(mode), Fore.RED)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,110 @@
+# =============================================================================
+# EDAV Azure Resource Monitor - Phase 1
+# config/monitor_rules.yml
+# Controls which monitors are enabled, their thresholds, and behavior.
+# =============================================================================
+
+monitors:
+
+  private_endpoints:
+    enabled: true
+    resource_type: "Microsoft.Network/privateEndpoints"
+    description: "Discovers disconnected Azure Private Endpoints"
+    safe_delete_criteria:
+      connection_state: Disconnected
+      backend_exists: false
+    risk_scoring:
+      low_risk:
+        - disconnected: true
+        - backend_found: false
+        - terraform_managed: false
+      medium_risk:
+        - disconnected: true
+        - backend_found: true
+        - owner_unknown: true
+      high_risk:
+        - production_subscription: true
+        - terraform_managed: true
+        - backend_exists: true
+        - ownership_unclear: true
+    auto_delete_supported: true
+    report_columns:
+      - Endpoint Name
+      - Resource Group
+      - Subscription
+      - Connection State
+      - Private Link Resource ID
+      - Recommended Action
+      - Risk Level
+      - Owner Team
+      - Contact
+      - Approval Status
+      - Notes
+
+  storage_accounts:
+    enabled: true
+    resource_type: "Microsoft.Storage/storageAccounts"
+    description: "Discovers idle/orphaned Azure Storage Accounts"
+    idle_days_threshold: 90
+    baseline_monthly_cost_usd: 5.0
+    auto_delete_supported: false
+    discovery_only: false
+    report_columns:
+      - Account Name
+      - Resource Group
+      - Subscription
+      - Location
+      - Tags
+      - Owner Team
+      - Classification
+      - Idle Days
+      - Estimated Monthly Cost
+
+  terraform_drift:
+    enabled: true
+    description: "Detects drift between Azure resources and Terraform state"
+    scan_tf_state: true
+    scan_tf_source: true
+    drift_categories:
+      - NOT_IN_TERRAFORM
+      - NOT_IN_AZURE
+      - CONFIG_DRIFT
+    report_columns:
+      - Resource Name
+      - Resource Type
+      - Resource Group
+      - Drift Type
+      - Drift Detail
+      - Terraform Address
+      - Recommended Action
+      - Severity
+
+# ---------------------------------------------------------------------------
+# Global report settings
+# ---------------------------------------------------------------------------
+report_settings:
+  output_dir: reports
+  team_reports_dir: team_reports
+  logs_dir: logs
+  executive_summary: true
+  team_reports: true
+  formats:
+    - csv
+    - xlsx
+    - md
+    - html
+    - json
+
+# ---------------------------------------------------------------------------
+# Risk level definitions
+# ---------------------------------------------------------------------------
+risk_levels:
+  low:
+    color: green
+    description: "Safe to delete. No active backend. Not Terraform-managed."
+  medium:
+    color: yellow
+    description: "Review required. Backend may still exist or owner unknown."
+  high:
+    color: red
+    description: "Do not delete without DBA/platform lead approval. Production or TF-managed."
