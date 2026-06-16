@@ -1,9 +1,10 @@
-# EDAV Resource Monitor Cleanup Platform - v5.0.0
+# EDAV Resource Monitor & Cost Optimization Platform - v6.0.0
 # Python dependencies
 
 # Core data processing
 pandas>=2.0.0
 openpyxl>=3.1.0
+xlsxwriter>=3.1.0
 
 # YAML config support
 pyyaml>=6.0.0
@@ -14,19 +15,27 @@ jinja2>=3.1.0
 # Colored console output
 colorama>=0.4.6
 
-# Excel formatting (for color-coded reports)
-xlsxwriter>=3.1.0
-
-# Optional: for enhanced date parsing in input files
+# Enhanced date parsing
 python-dateutil>=2.8.2
 
-# Optional: for email notifications
-# smtplib is built-in; no extra package needed
+# Azure SDK (optional but recommended for SDK-backed monitors)
+azure-mgmt-resource>=23.0.0
+azure-mgmt-compute>=30.0.0
+azure-mgmt-network>=25.0.0
+azure-mgmt-storage>=21.0.0
+azure-mgmt-keyvault>=10.0.0
+azure-mgmt-containerservice>=28.0.0
+azure-mgmt-sql>=3.0.1
+azure-mgmt-web>=7.0.0
+azure-mgmt-redis>=14.0.0
+azure-mgmt-search>=9.0.0
+azure-mgmt-eventhub>=11.0.0
+azure-mgmt-eventgrid>=10.2.0
+azure-mgmt-machinelearningservices>=1.0.0
+azure-mgmt-databricks>=1.0.0
+azure-mgmt-cognitiveservices>=13.5.0
+azure-identity>=1.15.0
 
-# Optional: for Azure SDK (future enhancement - currently uses az CLI)
-# azure-mgmt-resource>=23.0.0
-# azure-mgmt-compute>=30.0.0
-# azure-mgmt-network>=25.0.0
-# azure-mgmt-storage>=21.0.0
-# azure-mgmt-keyvault>=10.0.0
-# azure-identity>=1.15.0
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
