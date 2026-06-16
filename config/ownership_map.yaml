@@ -1,0 +1,213 @@
+# =============================================================================
+# EDAV Resource Monitor Cleanup Platform - v5.0.0
+# config/ownership_map.yaml
+# Maps resource groups, resource name patterns, subscriptions, and tag values
+# to EDAV teams/owners for automated ownership classification.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Resource Group Pattern -> Team Mapping
+# Supports wildcard (*) prefix/suffix matching
+# ---------------------------------------------------------------------------
+resource_group_patterns:
+
+  # EDAV Platform / Core Infrastructure
+  ocio-dav-dev: "EDAV Platform"
+  ocio-dav-tst: "EDAV Platform"
+  ocio-dav-prd: "EDAV Platform"
+  ocio-edav-dev: "EDAV Platform"
+  ocio-edav-tst: "EDAV Platform"
+  ocio-edav-prd: "EDAV Platform"
+  ocio-edav-*: "EDAV Platform"
+
+  # Network Team
+  ocio-network: "Network Team"
+  ocio-network-*: "Network Team"
+  network-*: "Network Team"
+
+  # EDAV High / Test High
+  ocio-edav-tst-high-internal-rg: "EDAV Test High"
+  ocio-edav-prd-high-internal-rg: "EDAV Production High"
+  *-high-internal-rg: "EDAV High Platform"
+
+  # Shared Services
+  ocio-shared-*: "Shared Services Team"
+  shared-services-*: "Shared Services Team"
+  ocio-tsbdev-*: "OCIO Dev Platform"
+  ocio-tsbprd-*: "OCIO Production Platform"
+
+  # Data & Analytics
+  ocio-edav-analytics-*: "EDAV Analytics"
+  edav-analytics-*: "EDAV Analytics"
+
+  # Machine Learning / AML
+  ocio-edav-aml-*: "AML Team"
+  edav-aml-*: "AML Team"
+  *-machinelearning-*: "AML Team"
+
+  # Storage / Data Lake
+  ocio-edav-storage-*: "EDAV Storage Team"
+  edav-datalake-*: "EDAV Data Lake Team"
+
+  # Security
+  ocio-security-*: "Security Team"
+  edav-security-*: "Security Team"
+
+  # Disaster Recovery
+  *-dr-*: "DR/BCP Team"
+  *-disaster-*: "DR/BCP Team"
+
+  # Container / AKS
+  *-aks-*: "Container Platform Team"
+  *-containers-*: "Container Platform Team"
+
+  # Default fallback
+  "*": "UNKNOWN - Needs Owner Assignment"
+
+# ---------------------------------------------------------------------------
+# Resource Name Pattern -> Team Mapping
+# Applied when resource group mapping is insufficient
+# ---------------------------------------------------------------------------
+resource_name_patterns:
+
+  # DR Drill resources
+  edavdrdrill2026*: "DR Drill Team"
+  edav-dr-*: "DR/BCP Team"
+  *-dr-drill-*: "DR/BCP Team"
+
+  # AML / Machine Learning
+  edav-aml*: "AML Team"
+  edav-ml-*: "AML Team"
+  *-aml-workspace-*: "AML Team"
+  *-machinelearning-*: "AML Team"
+
+  # Private Endpoints - common naming patterns
+  *-pe: "EDAV Platform"
+  *-private-endpoint: "EDAV Platform"
+  *-pep: "EDAV Platform"
+
+  # Key Vault
+  edav-kv-*: "EDAV Platform"
+  *-keyvault-*: "Security Team"
+
+  # Storage
+  edavsa*: "EDAV Storage Team"
+  edavstorage*: "EDAV Storage Team"
+  *datalake*: "EDAV Data Lake Team"
+
+  # Event Grid / Event Hub
+  edav-evgrid-*: "EDAV Events Team"
+  edav-evhub-*: "EDAV Events Team"
+  *-eventhub-*: "EDAV Events Team"
+
+  # Databases / SQL
+  edav-sql-*: "EDAV Data Team"
+  edav-sqlmi-*: "EDAV Data Team"
+  *-sql-managed-*: "EDAV Data Team"
+
+  # Networking
+  edav-nsg-*: "Network Team"
+  edav-pip-*: "Network Team"
+  edav-nic-*: "Network Team"
+  edav-vnet-*: "Network Team"
+
+  # Container Registry
+  edavacr*: "Container Platform Team"
+  edavregistry*: "Container Platform Team"
+
+  # Test / Dev resources
+  test-*: "EDAV Platform (Test)"
+  dev-*: "EDAV Platform (Dev)"
+  sandbox-*: "EDAV Platform (Sandbox)"
+  temp-*: "UNKNOWN - Temporary Resource"
+  tmp-*: "UNKNOWN - Temporary Resource"
+
+# ---------------------------------------------------------------------------
+# Subscription Name -> Team/Environment Mapping
+# ---------------------------------------------------------------------------
+subscription_patterns:
+  OCIO-TSBDEV-C1: "EDAV Platform - Dev"
+  OCIO-TSBPRD-C1: "EDAV Platform - Production"
+  OCIO-TSBTST-C1: "EDAV Platform - Test"
+  OCIO-TSBDEV-*: "EDAV Platform - Dev"
+  OCIO-TSBPRD-*: "EDAV Platform - Production"
+  "*-DEV-*": "Development"
+  "*-PRD-*": "Production"
+  "*-TST-*": "Test"
+  "*-STG-*": "Staging"
+
+# ---------------------------------------------------------------------------
+# Azure Tag -> Owner Mapping
+# Tag keys checked in priority order
+# ---------------------------------------------------------------------------
+owner_tag_keys:
+  - "owner"
+  - "Owner"
+  - "OWNER"
+  - "EDAV_Created_By"
+  - "EDAV_Business_POC"
+  - "EDAV_Project_Name"
+  - "EDAV_Center_Name"
+  - "EDAV_Division_Name"
+  - "application"
+  - "Application"
+  - "team"
+  - "Team"
+  - "department"
+  - "Department"
+  - "created_by"
+  - "CreatedBy"
+  - "contact"
+  - "Contact"
+  - "cost_center"
+  - "CostCenter"
+
+# ---------------------------------------------------------------------------
+# Tag Value -> Team Name Normalization
+# Maps raw tag values to standard team names
+# ---------------------------------------------------------------------------
+tag_value_normalization:
+  "edav-platform": "EDAV Platform"
+  "edav platform": "EDAV Platform"
+  "edavplatform": "EDAV Platform"
+  "network": "Network Team"
+  "networking": "Network Team"
+  "network team": "Network Team"
+  "security": "Security Team"
+  "infosec": "Security Team"
+  "aml": "AML Team"
+  "machine-learning": "AML Team"
+  "machinelearning": "AML Team"
+  "data": "EDAV Data Team"
+  "analytics": "EDAV Analytics"
+  "storage": "EDAV Storage Team"
+  "containers": "Container Platform Team"
+  "aks": "Container Platform Team"
+  "dr": "DR/BCP Team"
+  "shared": "Shared Services Team"
+
+# ---------------------------------------------------------------------------
+# Known Resource IDs with explicit owners
+# For resources that can't be auto-classified
+# ---------------------------------------------------------------------------
+explicit_resource_owners:
+  # Format: resource_name_or_id: "Team Name | owner@cdc.gov"
+  # Example:
+  # prod-shared-pe: "Shared Services Team | team@cdc.gov"
+  # legacy-sql-mi-01: "EDAV Data Team | dba-team@cdc.gov"
+
+# ---------------------------------------------------------------------------
+# Escalation contacts per team
+# ---------------------------------------------------------------------------
+team_contacts:
+  "EDAV Platform": "edav-platform@cdc.gov"
+  "Network Team": "network-team@cdc.gov"
+  "Security Team": "security-team@cdc.gov"
+  "AML Team": "aml-team@cdc.gov"
+  "EDAV Data Team": "edav-data@cdc.gov"
+  "EDAV Analytics": "edav-analytics@cdc.gov"
+  "EDAV Storage Team": "edav-storage@cdc.gov"
+  "Container Platform Team": "container-platform@cdc.gov"
+  "DR/BCP Team": "dr-bcp@cdc.gov"
+  "Shared Services Team": "shared-services@cdc.gov"
+  "UNKNOWN - Needs Owner Assignment": "edav-platform@cdc.gov"

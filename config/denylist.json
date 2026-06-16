@@ -1,0 +1,36 @@
+{
+  "_comment": "EDAV Resource Monitor Cleanup Platform - Denylist v5.0.0",
+  "_description": "Hard-blocked from deletion. Takes precedence over all other settings including approvals.",
+  "blocked_resource_names": [
+    "prod-critical-pe",
+    "shared-services-pe",
+    "platform-hub-pe",
+    "prod-keyvault-pe",
+    "prod-sql-pe",
+    "prod-storage-pe",
+    "prod-aml-pe",
+    "prod-acr-pe",
+    "ocio-shared-kv-pe",
+    "ocio-platform-sql-pe",
+    "edav-high-keyvault-pe",
+    "edav-high-sql-pe",
+    "edav-prd-high-internal-pe"
+  ],
+  "blocked_resource_groups": [
+    "ocio-edav-prd-high-internal-rg",
+    "ocio-edav-prd-internal-rg",
+    "ocio-network"
+  ],
+  "blocked_name_patterns": [
+    "prod-*",
+    "*-prd-*",
+    "*-production-*",
+    "*-high-*",
+    "*-dr-*"
+  ],
+  "blocked_tags": {
+    "environment": ["production", "prod", "prd", "high"],
+    "protected": ["true", "yes", "1"],
+    "do_not_delete": ["true", "yes", "1"]
+  }
+}

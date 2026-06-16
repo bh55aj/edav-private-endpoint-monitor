@@ -1,0 +1,7 @@
+ResourceName,ResourceGroup,Subscription,ResourceType,ApprovedToDelete,ApprovalTicket,ApprovedBy,Notes
+edavdrdrill2026-dfs-pe,ocio-network,OCIO-TSBDEV-C1,Microsoft.Network/privateEndpoints,Yes,CHG0012345,Linda Johnson,Post-DR Drill cleanup. Backend confirmed gone. Validated 2026-06-10.
+tempendpoint,ocio-network,OCIO-TSBDEV-C1,Microsoft.Network/privateEndpoints,Yes,CHG0012345,Linda Johnson,Orphaned PE. Backend resource not found. Validated 2026-06-10.
+orphaned-nic-01,ocio-edav-dev,OCIO-TSBDEV-C1,Microsoft.Network/networkInterfaces,Yes,CHG0012345,Linda Johnson,Unattached NIC confirmed. No VM or PE attached. Validated 2026-06-10.
+stale-disk-01,ocio-edav-dev,OCIO-TSBDEV-C1,Microsoft.Compute/disks,Yes,CHG0012345,Linda Johnson,Unattached 512GB disk. ManagedBy=null confirmed. Validated 2026-06-10.
+unused-pip-01,ocio-edav-dev,OCIO-TSBDEV-C1,Microsoft.Network/publicIPAddresses,Yes,CHG0012345,Linda Johnson,Unattached public IP. IPConfiguration=null. Validated 2026-06-10.
+stale-disk-02,ocio-edav-tst,OCIO-TSBDEV-C1,Microsoft.Compute/disks,Yes,CHG0012345,Linda Johnson,Unattached 128GB disk. ManagedBy=null confirmed. Validated 2026-06-10.
