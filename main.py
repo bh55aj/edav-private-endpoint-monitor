@@ -47,6 +47,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Governance scanner (Resource Graph multi-type)
+try:
+    from monitors.governance_scanner import (
+        GovernanceScanner, GovernanceClassifier,
+        GOVERNANCE_QUERIES,
+        CLS_KEEP, CLS_SAFE_DELETE, CLS_REVIEW,
+        CLS_DO_NOT_DELETE, CLS_NOT_FOUND, CLS_UNKNOWN,
+        RECOMMENDED_ACTIONS,
+    )
+    GOVERNANCE_SCANNER_AVAILABLE = True
+except ImportError:
+    GOVERNANCE_SCANNER_AVAILABLE = False
+
 try:
     import pandas as pd
 except ImportError:
@@ -1580,6 +1593,304 @@ def print_executive_dashboard(results, run_meta, deletion_results=None):
         print(f"  Deletion Failures             : {failed}")
     cprint("=" * 72, Fore.CYAN)
 
+
+# ============================================================================
+# GOVERNANCE REPORT GENERATOR
+# ============================================================================
+
+GOVERNANCE_EXCEL_COLORS = {
+    "SAFE_DELETE":       "FF00AA44",
+    "REVIEW_REQUIRED":   "FFFF9900",
+    "KEEP":              "FF6699CC",
+    "DO_NOT_DELETE":     "FFCC0000",
+    "RESOURCE_NOT_FOUND":"FFAAAAAA",
+    "UNKNOWN":           "FFDDDDDD",
+}
+
+
+class GovernanceReportGenerator:
+    """
+    Generates all governance scan output reports.
+    Tabs: SAFE_DELETE | REVIEW_REQUIRED | KEEP | DO_NOT_DELETE | All Findings
+    Formats: CSV, Excel (multi-tab), Markdown, HTML, JSON
+    """
+
+    def __init__(self, output_dir: str = "reports"):
+        self.output_dir = output_dir
+        self.timestamp = ts()
+        ensure_dirs(output_dir)
+
+    def _report_path(self, name: str, ext: str) -> str:
+        return str(Path(self.output_dir) / ("EDAV_Governance_" + name + "_" + self.timestamp + "." + ext))
+
+    def generate_all(self, results: List[Dict], summary: Dict,
+                     run_meta: Dict) -> Dict[str, str]:
+        """Generate all report formats. Returns {format: filepath}."""
+        files = {}
+        files["csv"] = self._write_csv(results)
+        files["json"] = self._write_json(results, summary, run_meta)
+        files["md"] = self._write_markdown(results, summary, run_meta)
+        if pd and openpyxl:
+            files["xlsx"] = self._write_excel(results, summary, run_meta)
+        files["html"] = self._write_html(results, summary, run_meta)
+        return files
+
+    def _write_csv(self, results: List[Dict]) -> str:
+        path = self._report_path("Full_Findings", "csv")
+        if not results:
+            return path
+        try:
+            fieldnames = list(results[0].keys())
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(results)
+            cprint("  CSV: " + path, Fore.GREEN)
+        except Exception as e:
+            cprint("  [WARN] CSV write failed: " + str(e), Fore.YELLOW)
+        return path
+
+    def _write_json(self, results: List[Dict], summary: Dict, run_meta: Dict) -> str:
+        path = self._report_path("Full_Report", "json")
+        try:
+            with open(path, "w") as f:
+                json.dump({"run_metadata": run_meta, "summary": summary,
+                           "results": results}, f, indent=2, default=str)
+            cprint("  JSON: " + path, Fore.GREEN)
+        except Exception as e:
+            cprint("  [WARN] JSON write failed: " + str(e), Fore.YELLOW)
+        return path
+
+    def _write_markdown(self, results: List[Dict], summary: Dict, run_meta: Dict) -> str:
+        path = self._report_path("Executive_Summary", "md")
+        try:
+            totals = summary.get("totals", {})
+            run_date = run_meta.get("run_date", "")
+            subs = ", ".join(run_meta.get("subscriptions", []) or ["all"])
+            query_results = summary.get("query_results", {})
+
+            lines = [
+                "# EDAV Governance Scan - Executive Summary",
+                "",
+                "**Run Date:** " + run_date,
+                "**Subscriptions:** " + subs,
+                "**Total Resources Found:** " + str(totals.get("total", 0)),
+                "",
+                "## Classification Summary",
+                "",
+                "| Classification | Count |",
+                "|----------------|-------|",
+                "| SAFE_DELETE (Cleanup Candidates) | " + str(totals.get("SAFE_DELETE", 0)) + " |",
+                "| REVIEW_REQUIRED (Owner Review) | " + str(totals.get("REVIEW_REQUIRED", 0)) + " |",
+                "| KEEP (Azure-Managed / In Use) | " + str(totals.get("KEEP", 0)) + " |",
+                "| DO_NOT_DELETE (Blocked) | " + str(totals.get("DO_NOT_DELETE", 0)) + " |",
+                "| RESOURCE_NOT_FOUND (Already Gone) | " + str(totals.get("RESOURCE_NOT_FOUND", 0)) + " |",
+                "| UNKNOWN | " + str(totals.get("UNKNOWN", 0)) + " |",
+                "",
+                "## EDAV Governance Scan Summary",
+                "",
+                "| Category | Total | SAFE_DELETE | REVIEW | KEEP |",
+                "|----------|-------|-------------|--------|------|",
+            ]
+            for key, qr in query_results.items():
+                cls_counts = qr.get("classifications", {})
+                lines.append(
+                    "| " + qr.get("display_name", key) + " | " + str(qr.get("count", 0)) +
+                    " | " + str(cls_counts.get("SAFE_DELETE", 0)) +
+                    " | " + str(cls_counts.get("REVIEW_REQUIRED", 0)) +
+                    " | " + str(cls_counts.get("KEEP", 0)) + " |"
+                )
+
+            lines += [
+                "",
+                "## SAFE_DELETE Candidates",
+                "",
+                "| Resource | Type | Resource Group | Subscription | Reason |",
+                "|----------|------|----------------|--------------|--------|",
+            ]
+            for r in results:
+                if r.get("Classification") == "SAFE_DELETE":
+                    lines.append(
+                        "| " + r.get("ResourceName", "") +
+                        " | " + r.get("ResourceType", "").split("/")[-1] +
+                        " | " + r.get("ResourceGroup", "") +
+                        " | " + str(r.get("Subscription", ""))[:20] +
+                        " | " + r.get("Reason", "")[:60] + " |"
+                    )
+
+            lines += [
+                "",
+                "## NIC Safety Note",
+                "",
+                "> **IMPORTANT:** An unattached NIC does NOT mean it is orphaned.",
+                "> Many NICs are Azure-managed (AKS node NICs, PE NICs ending in `-pe-nic`,",
+                "> Databricks cluster NICs, App Gateway NICs). These are classified as **KEEP**.",
+                "> Never delete NICs without confirming they are not Azure-managed.",
+                "",
+                "## Recommended Next Steps",
+                "",
+                "1. Review SAFE_DELETE tab in the Excel report with network/platform teams",
+                "2. For each SAFE_DELETE candidate: collect ApprovalTicket and ApprovedBy",
+                "3. Mark ApprovedToDelete=Yes in the approved deletions spreadsheet",
+                "4. Dry-run: python main.py --mode delete --dry-run --delete-approved --input approved.xlsx",
+                "5. Live delete (requires SU account): --required-user bh55-su@cdc.gov",
+                "6. Post-delete: run --scan-governance again to confirm cleanup",
+                "7. Run Resource Graph query from docs/RESOURCE_GRAPH_QUERIES.md",
+            ]
+
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+            cprint("  Markdown: " + path, Fore.GREEN)
+        except Exception as e:
+            cprint("  [WARN] Markdown write failed: " + str(e), Fore.YELLOW)
+        return path
+
+    def _write_excel(self, results: List[Dict], summary: Dict, run_meta: Dict) -> str:
+        path = self._report_path("Findings", "xlsx")
+        try:
+            df_all = pd.DataFrame(results)
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df_all.to_excel(writer, sheet_name="All Findings", index=False)
+
+                for cls_name, sheet_name in [
+                    ("SAFE_DELETE",     "SAFE_DELETE"),
+                    ("REVIEW_REQUIRED", "REVIEW_REQUIRED"),
+                    ("KEEP",            "KEEP"),
+                    ("DO_NOT_DELETE",   "DO_NOT_DELETE"),
+                ]:
+                    if "Classification" in df_all.columns:
+                        df_cls = df_all[df_all["Classification"] == cls_name]
+                        if not df_cls.empty:
+                            df_cls.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+                if "QueryCategory" in df_all.columns:
+                    for cat in df_all["QueryCategory"].dropna().unique():
+                        df_cat = df_all[df_all["QueryCategory"] == cat]
+                        if not df_cat.empty:
+                            sheet = cat.replace("_", " ").title()[:31]
+                            df_cat.to_excel(writer, sheet_name=sheet, index=False)
+
+                totals = summary.get("totals", {})
+                summary_rows = [
+                    ["Classification", "Count"],
+                    ["SAFE_DELETE", totals.get("SAFE_DELETE", 0)],
+                    ["REVIEW_REQUIRED", totals.get("REVIEW_REQUIRED", 0)],
+                    ["KEEP", totals.get("KEEP", 0)],
+                    ["DO_NOT_DELETE", totals.get("DO_NOT_DELETE", 0)],
+                    ["RESOURCE_NOT_FOUND", totals.get("RESOURCE_NOT_FOUND", 0)],
+                    ["UNKNOWN", totals.get("UNKNOWN", 0)],
+                    ["Total", totals.get("total", 0)],
+                    ["Azure-Managed", totals.get("azure_managed", 0)],
+                ]
+                pd.DataFrame(summary_rows[1:], columns=summary_rows[0]).to_excel(
+                    writer, sheet_name="Summary", index=False
+                )
+
+                wb = writer.book
+                ws = wb["All Findings"]
+                if ws.max_row > 1:
+                    cls_col = None
+                    for col_idx, cell in enumerate(ws[1], 1):
+                        if cell.value == "Classification":
+                            cls_col = col_idx
+                            break
+                    if cls_col:
+                        for row_cells in ws.iter_rows(min_row=2):
+                            cls_val = row_cells[cls_col - 1].value or ""
+                            fill_hex = GOVERNANCE_EXCEL_COLORS.get(cls_val, "FFFFFFFF")
+                            fill = PatternFill(start_color=fill_hex,
+                                              end_color=fill_hex, fill_type="solid")
+                            for cell in row_cells:
+                                cell.fill = fill
+
+            cprint("  Excel: " + path, Fore.GREEN)
+        except Exception as e:
+            cprint("  [WARN] Excel write failed: " + str(e), Fore.YELLOW)
+        return path
+
+    def _write_html(self, results: List[Dict], summary: Dict, run_meta: Dict) -> str:
+        path = self._report_path("Dashboard", "html")
+        try:
+            totals = summary.get("totals", {})
+            run_date = run_meta.get("run_date", "")
+            subs_str = ", ".join(run_meta.get("subscriptions", []) or ["all"])
+
+            cls_bg = {
+                "SAFE_DELETE": "#d4edda",
+                "REVIEW_REQUIRED": "#fff3cd",
+                "KEEP": "#cce5ff",
+                "DO_NOT_DELETE": "#f8d7da",
+                "RESOURCE_NOT_FOUND": "#e2e3e5",
+                "UNKNOWN": "#f8f9fa",
+            }
+
+            rows_html_parts = []
+            for r in results:
+                cls = r.get("Classification", "UNKNOWN")
+                bg = cls_bg.get(cls, "#ffffff")
+                az_mgd = "Azure-Mgd" if r.get("AzureManaged") else ""
+                rows_html_parts.append(
+                    "<tr style=\"background:" + bg + "\">"
+                    "<td>" + r.get("ResourceName","") + "</td>"
+                    "<td>" + r.get("ResourceType","").split("/")[-1] + "</td>"
+                    "<td>" + r.get("ResourceGroup","") + "</td>"
+                    "<td>" + str(r.get("Subscription",""))[:20] + "</td>"
+                    "<td>" + r.get("Location","") + "</td>"
+                    "<td><b>" + cls + "</b></td>"
+                    "<td>" + r.get("Reason","")[:80] + "</td>"
+                    "<td>" + az_mgd + "</td>"
+                    "<td>" + r.get("OwnerTeam","") + "</td>"
+                    "<td>" + r.get("RecommendedAction","")[:60] + "</td>"
+                    "</tr>"
+                )
+            rows_html = "\n".join(rows_html_parts)
+
+            html_parts = [
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">",
+                "<title>EDAV Governance Scan - " + run_date + "</title>",
+                "<style>body{font-family:Arial,sans-serif;margin:20px;}",
+                "table{border-collapse:collapse;width:100%;font-size:11px;}",
+                "th,td{border:1px solid #ddd;padding:5px;text-align:left;}",
+                "th{background:#2d5986;color:white;}",
+                ".summary{background:#f8f9fa;padding:15px;border-radius:8px;margin-bottom:20px;}",
+                ".badge{display:inline-block;padding:8px 15px;border-radius:5px;font-weight:bold;margin:3px;}",
+                ".nic-warn{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:5px;margin-bottom:15px;}",
+                "h1{color:#2d5986;}</style></head><body>",
+                "<h1>EDAV Governance Scan - " + run_date + "</h1>",
+                "<p><b>Subscriptions:</b> " + subs_str + "</p>",
+                "<div class=\"nic-warn\">",
+                "<b>NIC Safety Rule:</b> An unattached NIC does NOT mean it is orphaned. ",
+                "Check for -pe-nic, .nic., AKS, Databricks patterns before any deletion.",
+                "</div>",
+                "<div class=\"summary\">",
+                "<div class=\"badge\" style=\"background:#d4edda\">SAFE_DELETE: " + str(totals.get("SAFE_DELETE",0)) + "</div>",
+                "<div class=\"badge\" style=\"background:#fff3cd\">REVIEW_REQUIRED: " + str(totals.get("REVIEW_REQUIRED",0)) + "</div>",
+                "<div class=\"badge\" style=\"background:#cce5ff\">KEEP: " + str(totals.get("KEEP",0)) + "</div>",
+                "<div class=\"badge\" style=\"background:#f8d7da\">DO_NOT_DELETE: " + str(totals.get("DO_NOT_DELETE",0)) + "</div>",
+                "<div class=\"badge\" style=\"background:#e2e3e5\">Total: " + str(totals.get("total",0)) + " | Azure-Managed: " + str(totals.get("azure_managed",0)) + "</div>",
+                "</div>",
+                "<table><thead><tr>",
+                "<th>Resource Name</th><th>Type</th><th>Resource Group</th>",
+                "<th>Subscription</th><th>Location</th><th>Classification</th>",
+                "<th>Reason</th><th>Azure-Mgd</th><th>Owner</th><th>Recommended Action</th>",
+                "</tr></thead><tbody>",
+                rows_html,
+                "</tbody></table>",
+                "<p style=\"color:#666;font-size:11px;margin-top:15px\">",
+                "EDAV Resource Governance Platform v" + VERSION + " | ",
+                "Nothing is deleted without validation, approval, a change ticket, an approver, and a typed CONFIRM.",
+                "</p></body></html>",
+            ]
+            html = "\n".join(html_parts)
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            cprint("  HTML: " + path, Fore.GREEN)
+        except Exception as e:
+            cprint("  [WARN] HTML write failed: " + str(e), Fore.YELLOW)
+        return path
+
 # ============================================================================
 # MAIN PIPELINE
 # ============================================================================
@@ -2053,6 +2364,12 @@ def main():
     audit_only = getattr(args, "audit_only", False)
     cleanup_approved = getattr(args, "cleanup_approved", False)
 
+    # Governance scan mode (new)
+    scan_gov = getattr(args, "scan_governance", False)
+    if scan_gov:
+        run_governance_scan(args)
+        return
+
     if mode in ("report", "delete", "test-delete"):
         # Phase 1 modular pipeline
         run_phase1_pipeline(args)
@@ -2094,6 +2411,20 @@ example usage:
 
   # Legacy audit mode (unchanged)
   python main.py --input findings.csv --audit-only
+
+  # Governance scan (Resource Graph - all resource types)
+  python main.py --scan-governance \
+    --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1" \
+    --output-dir reports/governance/
+
+  # Governance scan - specific query
+  python main.py --scan-governance --governance-query unattached_nics \
+    --subscriptions "OCIO-TSBDEV-C1"
+
+  # Test-delete mode (single endpoint, safe)
+  python main.py --mode test-delete --resource-type private-endpoints \
+    --name testwebbseries-pe --resource-group ocio-network \
+    --subscription OCIO-TSBDEV-C1 --required-user bh55-su@cdc.gov
 """
     )
     p.add_argument('--mode', choices=['report', 'delete', 'test-delete'], default=None,
@@ -2131,6 +2462,16 @@ example usage:
                  help='Subscription name (used with --mode test-delete)')
     p.add_argument('--allow-terraform-managed', action='store_true',
                  help='Override Terraform protection gate (use with caution)')
+    p.add_argument('--scan-governance', action='store_true',
+                 help='Run broad EDAV Resource Governance scan using Azure Resource Graph. '
+                      'Discovers disconnected PEs, unattached NSGs/disks/PIPs/NICs, '
+                      'stopped VMs, Event Grid topics with no subscriptions, storage review, '
+                      'and AKS/Databricks managed resources. '
+                      'Example: python main.py --scan-governance '
+                      '--subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1"')
+    p.add_argument('--governance-query', dest='governance_query', default=None,
+                 help='Filter governance scan to a specific query category '
+                      '(e.g. unattached_nics, disconnected_private_endpoints)')
     p.add_argument('--config-dir', dest='config_dir', default='config',
                    help='Config directory (default: config/)')
     p.add_argument('--change-ticket', default='',
@@ -2492,6 +2833,175 @@ def _write_test_report(lines: List[str], output_dir: str, timestamp_str: str) ->
         cprint("  Test report: " + str(path), Fore.GREEN)
     except Exception as e:
         cprint("  [WARN] Test report write failed: " + str(e), Fore.YELLOW)
+
+
+def run_governance_scan(args) -> None:
+    """
+    Run the broad EDAV Resource Governance scan using Azure Resource Graph.
+    Discovers: disconnected PEs, unattached NSGs/disks/PIPs/NICs,
+    stopped VMs, Event Grid topics, storage, AKS/Databricks resources.
+    Generates: CSV, Excel (multi-tab), Markdown, HTML, JSON reports.
+
+    Usage:
+      python main.py --scan-governance \
+        --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+        --output-dir reports/governance/
+    """
+    if not GOVERNANCE_SCANNER_AVAILABLE:
+        cprint("[ERROR] GovernanceScanner not available.", Fore.RED, bold=True)
+        cprint("  Ensure monitors/governance_scanner.py is present.", Fore.YELLOW)
+        return
+
+    run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp_str = ts()
+    output_dir = getattr(args, "output_dir", "reports") or "reports"
+    subscriptions_arg = getattr(args, "subscriptions", "") or ""
+    subscriptions = [s.strip() for s in subscriptions_arg.split(",") if s.strip()]
+    dry_run = getattr(args, "dry_run", False)
+    query_filter = getattr(args, "governance_query", None)  # optional filter
+    terraform_path = getattr(args, "terraform_path", None)
+
+    ensure_dirs(output_dir, "team_reports", "logs")
+
+    sep = "=" * 72
+    cprint("\n" + sep, Fore.CYAN, bold=True)
+    cprint("  EDAV Resource Governance Scan v" + VERSION, Fore.CYAN, bold=True)
+    cprint("  Powered by Azure Resource Graph", Fore.CYAN)
+    cprint(sep, Fore.CYAN)
+    cprint("  Subscriptions  : " + (", ".join(subscriptions) if subscriptions else "all accessible"), Fore.WHITE)
+    cprint("  Output dir     : " + output_dir, Fore.WHITE)
+    cprint("  Date           : " + run_date, Fore.WHITE)
+    if dry_run:
+        cprint("  [DRY RUN] Reports only - no deletions.", Fore.YELLOW, bold=True)
+
+    # Verify az graph extension is available
+    cur_user = get_current_az_user()
+    cur_sub = get_current_subscription_info()
+    cprint("  Azure CLI user : " + (cur_user or "unknown"), Fore.WHITE)
+    cprint("  Current sub    : " + (cur_sub.get("name") or "unknown"), Fore.WHITE)
+    cprint(sep, Fore.CYAN)
+
+    # Determine which queries to run
+    query_keys = list(GOVERNANCE_QUERIES.keys())
+    if query_filter:
+        query_keys = [k for k in query_keys if query_filter.lower() in k.lower()]
+
+    cprint("\n  Running " + str(len(query_keys)) + " governance queries...", Fore.CYAN)
+
+    scanner = GovernanceScanner(
+        subscriptions=subscriptions,
+        query_keys=query_keys,
+        terraform_path=terraform_path,
+    )
+
+    all_results, summary = scanner.scan()
+
+    # Print per-query results as they come in
+    cprint("\n" + sep, Fore.CYAN)
+    cprint("  GOVERNANCE SCAN RESULTS", Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+
+    query_results = summary.get("query_results", {})
+    for key, qr in query_results.items():
+        display = qr.get("display_name", key)
+        count = qr.get("count", 0)
+        err = qr.get("error")
+        cls_counts = qr.get("classifications", {})
+
+        if err:
+            cprint("  [ERROR] " + display + ": " + str(err)[:80], Fore.RED)
+            continue
+
+        safe_n = cls_counts.get("SAFE_DELETE", 0)
+        review_n = cls_counts.get("REVIEW_REQUIRED", 0)
+        keep_n = cls_counts.get("KEEP", 0)
+
+        line = "  " + display.ljust(45) + " | Total: " + str(count).rjust(4)
+        if safe_n:
+            line += " | SAFE_DELETE: " + str(safe_n)
+        if review_n:
+            line += " | REVIEW: " + str(review_n)
+        if keep_n:
+            line += " | KEEP: " + str(keep_n)
+        cprint(line, Fore.WHITE if count == 0 else Fore.CYAN)
+
+    # Executive summary dashboard
+    totals = summary.get("totals", {})
+    cprint("\n" + sep, Fore.CYAN, bold=True)
+    cprint("  EDAV GOVERNANCE SCAN SUMMARY", Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+
+    def _pad(label: str) -> str:
+        return ("  " + label).ljust(48)
+
+    print(_pad("Disconnected Private Endpoints") +
+          ": " + str(query_results.get("disconnected_private_endpoints", {}).get("count", 0)))
+    print(_pad("Already Removed (RESOURCE_NOT_FOUND)") +
+          ": " + str(totals.get("RESOURCE_NOT_FOUND", 0)))
+    print(_pad("Unattached NSGs") +
+          ": " + str(query_results.get("unattached_nsgs", {}).get("count", 0)))
+    print(_pad("Unattached Managed Disks") +
+          ": " + str(query_results.get("unattached_disks", {}).get("count", 0)))
+    print(_pad("Unattached Public IPs") +
+          ": " + str(query_results.get("unattached_public_ips", {}).get("count", 0)))
+    print(_pad("Unattached NICs") +
+          ": " + str(query_results.get("unattached_nics", {}).get("count", 0)))
+    print(_pad("  -> KEEP (Azure-managed NICs)") +
+          ": " + str(query_results.get("unattached_nics", {}).get("classifications", {}).get("KEEP", 0)))
+    print(_pad("Stopped / Deallocated VMs") +
+          ": " + str(query_results.get("stopped_vms", {}).get("count", 0)))
+    print(_pad("Event Grid - No Subscriptions") +
+          ": " + str(query_results.get("eventgrid_no_subscriptions", {}).get("count", 0)))
+    print(_pad("Storage Accounts Needing Review") +
+          ": " + str(query_results.get("storage_review", {}).get("count", 0)))
+    print(_pad("AKS / Databricks Managed Resources") +
+          ": " + str(query_results.get("aks_databricks_resources", {}).get("count", 0)))
+    cprint("-" * 72, Fore.CYAN)
+    cprint("  SAFE_DELETE Candidates".ljust(48) + ": " + str(totals.get("SAFE_DELETE", 0)),
+           Fore.GREEN, bold=True)
+    cprint("  REVIEW_REQUIRED".ljust(48) + ": " + str(totals.get("REVIEW_REQUIRED", 0)),
+           Fore.YELLOW)
+    cprint("  KEEP (Azure-managed / In Use)".ljust(48) + ": " + str(totals.get("KEEP", 0)),
+           Fore.CYAN)
+    cprint("  DO_NOT_DELETE".ljust(48) + ": " + str(totals.get("DO_NOT_DELETE", 0)),
+           Fore.RED)
+    cprint("  No Action Needed".ljust(48) + ": " + str(totals.get("no_action_needed", 0)),
+           Fore.WHITE)
+    cprint("  Total Resources Found".ljust(48) + ": " + str(totals.get("total", 0)),
+           Fore.WHITE, bold=True)
+    cprint("=" * 72, Fore.CYAN)
+
+    # NIC safety reminder
+    nic_keep = query_results.get("unattached_nics", {}).get("classifications", {}).get("KEEP", 0)
+    if nic_keep > 0:
+        cprint("\n  NIC SAFETY: " + str(nic_keep) + " NIC(s) classified as KEEP (Azure-managed).",
+               Fore.YELLOW, bold=True)
+        cprint("  These NICs matched -pe-nic, .nic., AKS, Databricks, or Azure-managed RG patterns.",
+               Fore.YELLOW)
+        cprint("  DO NOT delete KEEP-classified NICs.", Fore.YELLOW)
+
+    # Generate reports
+    cprint("\n  Generating reports...", Fore.CYAN)
+    run_meta = {
+        "run_date": run_date,
+        "mode": "governance-scan",
+        "subscriptions": subscriptions,
+        "version": VERSION,
+        "query_keys": query_keys,
+    }
+    reporter = GovernanceReportGenerator(output_dir=output_dir)
+    report_files = reporter.generate_all(all_results, summary, run_meta)
+    cprint("  Reports written to: " + output_dir + "/", Fore.GREEN)
+
+    # Post-scan reminder
+    cprint("\n" + "=" * 72, Fore.CYAN)
+    cprint("  POST-SCAN ACTIONS", Fore.CYAN, bold=True)
+    cprint("=" * 72, Fore.CYAN)
+    cprint("  1. Review Excel SAFE_DELETE tab with network/platform teams", Fore.WHITE)
+    cprint("  2. Collect approvals (ApprovalTicket, ApprovedBy) for each candidate", Fore.WHITE)
+    cprint("  3. Run: python main.py --mode delete --dry-run --delete-approved --input approved.xlsx", Fore.WHITE)
+    cprint("  4. Run Resource Graph validation query from docs/RESOURCE_GRAPH_QUERIES.md", Fore.WHITE)
+    cprint("=" * 72, Fore.CYAN)
 
 
 def run_phase1_pipeline(args):
