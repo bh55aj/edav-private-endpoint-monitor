@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ============================================================================
-EDAV Resource Monitor Cleanup Platform - v5.0.0
+EDAV Resource Monitor Cleanup Platform - v6.1.0
 ============================================================================
 Enterprise Azure governance, cost-reduction, and safe cleanup platform
 for the EDAV Resource Monitor dashboard.
@@ -79,7 +79,7 @@ except ImportError:
 # CONSTANTS
 # ============================================================================
 
-VERSION = "5.0.0"
+VERSION = "6.1.0"
 TOOL_NAME = "EDAV Resource Monitor Cleanup Platform"
 DASHBOARD_URL = "https://internal-resource-monitor.edav.cdc.gov/dashboard"
 
@@ -1121,36 +1121,62 @@ class CleanupEngine:
             cprint(f"  [WARN] Backup failed for {name}: {e}", Fore.YELLOW)
             return None
 
-    def delete_resource(self, resource: Dict, validation: Dict) -> Tuple[str, str]:
-        """Delete a resource. Returns (result_status, error_msg)."""
+    def delete_resource(self, resource: Dict, validation: Dict) -> Tuple[str, str, str, str]:
+        """Delete a resource. Returns (result_status, error_msg, cmd_str, delete_method)."""
         if self.dry_run:
-            return "DRY_RUN_SIMULATED", ""
+            cmd_str = "DRY_RUN - no command executed"
+            return "DRY_RUN_SIMULATED", "", cmd_str, "dry_run"
         name = resource.get("resourcename", "")
         rg = resource.get("resourcegroup", "")
         rtype = resource.get("resourcetype", "").lower()
+        resource_id = resource.get("resourceid", "") or ""
 
-        cmd = self._get_delete_command(name, rg, rtype)
+        cmd = self._get_delete_command(name, rg, rtype, resource_id)
         if not cmd:
-            return "SKIP_UNSUPPORTED", f"No delete command for type: {rtype}"
+            return "SKIP_UNSUPPORTED", f"No delete command for type: {rtype}", "", ""
 
-        cprint(f"  [DELETE] Running: az {" ".join(cmd)}", Fore.YELLOW)
+        delete_method = "ids" if ("--ids" in cmd) else "name_rg"
+        cmd_str = "az " + " ".join(cmd)
+        cprint(f"  [DELETE] {cmd_str}", Fore.YELLOW)
+        cprint(f"  [METHOD] {delete_method}", Fore.YELLOW)
         start = time.time()
         _, err = run_az(cmd, timeout=120)
         duration = round(time.time() - start, 1)
 
         if err and err != "ResourceNotFound":
-            return "DELETE_FAILED", err[:200]
-        return "DELETED", ""
+            if "AuthorizationFailed" in err or "does not have authorization" in err.lower():
+                rbac_msg = (f"RBAC BLOCKED: account does not have "
+                            f"Microsoft.Network/privateEndpoints/delete on this scope.")
+                cprint(f"  [RBAC] {rbac_msg}", Fore.RED, bold=True)
+                return "DELETE_FAILED", rbac_msg, cmd_str, delete_method
+            return "DELETE_FAILED", err[:200], cmd_str, delete_method
+        cprint(f"  [OK] DELETED and VERIFIED_GONE pending post-check: {name}", Fore.GREEN, bold=True)
+        return "DELETED", "", cmd_str, delete_method
 
-    def _get_delete_command(self, name: str, rg: str, rtype: str) -> Optional[List[str]]:
-        """Return az CLI command for deleting the resource type."""
+    def _get_delete_command(self, name: str, rg: str, rtype: str,
+                             resource_id: str = "") -> Optional[List[str]]:
+        """Return az CLI command for deleting the resource type.
+        Prefers --ids (full resource ID) when available.
+        NOTE: az network private-endpoint delete does NOT support --yes.
+        Preferred order: if resource_id exists, delete by --ids; else by --name and --resource-group.
+        """
         if "privateendpoints" in rtype.replace("/", ""):
-            return ["network", "private-endpoint", "delete", "--name", name, "--resource-group", rg, "--yes"]
+            # Private endpoint delete does NOT support --yes flag
+            if resource_id:
+                return ["network", "private-endpoint", "delete", "--ids", resource_id]
+            return ["network", "private-endpoint", "delete",
+                    "--name", name, "--resource-group", rg]
         elif "networkinterfaces" in rtype:
+            if resource_id:
+                return ["network", "nic", "delete", "--ids", resource_id]
             return ["network", "nic", "delete", "--name", name, "--resource-group", rg, "--yes"]
         elif "publicipaddresses" in rtype:
+            if resource_id:
+                return ["network", "public-ip", "delete", "--ids", resource_id]
             return ["network", "public-ip", "delete", "--name", name, "--resource-group", rg, "--yes"]
         elif "microsoft.compute/disks" in rtype:
+            if resource_id:
+                return ["disk", "delete", "--ids", resource_id, "--yes"]
             return ["disk", "delete", "--name", name, "--resource-group", rg, "--yes"]
         else:
             return None  # Unsupported type - handled by safety gate
@@ -1394,6 +1420,118 @@ class ReportGenerator:
         return path
 
 # ============================================================================
+# PREFLIGHT CHECKER (Azure CLI & SU Account Enforcement)
+# ============================================================================
+
+DEFAULT_REQUIRED_DELETE_USER = "bh55-su@cdc.gov"
+
+def get_current_az_user() -> str:
+    """Return the active Azure CLI user.name (email). Returns '' on error."""
+    result, err = run_az(["account", "show", "--query", "user.name"], timeout=30)
+    if isinstance(result, str):
+        return result.strip().strip('"')
+    if isinstance(result, dict):
+        return str(result).strip().strip('"')
+    return ""
+
+def get_current_subscription_info() -> Dict:
+    """Return dict with 'name' and 'id' for the active subscription."""
+    result, err = run_az(["account", "show"], timeout=30)
+    if result and isinstance(result, dict):
+        return {"name": result.get("name", ""), "id": result.get("id", "")}
+    return {"name": "", "id": ""}
+
+
+class PreflightChecker:
+    """Validates Azure CLI state before any run.
+    For delete modes, enforces the SU account requirement.
+    """
+
+    def __init__(self, required_subscriptions: List[str] = None,
+                 required_user: str = None,
+                 mode: str = "report"):
+        self.required_subscriptions = required_subscriptions or []
+        self.required_user = required_user  # None = not enforced
+        self.mode = mode
+
+    def check_all(self) -> bool:
+        """Run all preflight checks. Returns True if all pass."""
+        cprint("\n  Preflight checks...", Fore.CYAN)
+        az_ok = self._check_az_cli()
+        if not az_ok:
+            return False
+        user_ok = self._check_su_account()
+        if not user_ok:
+            return False
+        return True
+
+    def _check_az_cli(self) -> bool:
+        """Verify Azure CLI is installed and authenticated."""
+        data, err = run_az(["account", "show"], timeout=30)
+        if err or not data:
+            cprint("  [PREFLIGHT FAIL] Azure CLI not logged in or not installed.", Fore.RED, bold=True)
+            cprint("  Run: az login --use-device-code", Fore.YELLOW)
+            return False
+        sub_name = data.get("name", "unknown") if isinstance(data, dict) else "unknown"
+        user_name = (data.get("user", {}) or {}).get("name", "unknown") if isinstance(data, dict) else "unknown"
+        cprint(f"  [PREFLIGHT OK] Azure CLI authenticated", Fore.GREEN)
+        cprint(f"    Current user       : {user_name}", Fore.WHITE)
+        cprint(f"    Current subscription: {sub_name}", Fore.WHITE)
+        return True
+
+    def _check_su_account(self) -> bool:
+        """Enforce SU account for delete/test-delete modes."""
+        if self.mode not in ("delete", "test-delete"):
+            return True  # Not required for report mode
+        if not self.required_user:
+            return True  # No enforcement configured
+
+        current_user = get_current_az_user()
+        if current_user.lower() == self.required_user.lower():
+            cprint(f"  [PREFLIGHT OK] SU account verified: {current_user}", Fore.GREEN)
+            return True
+
+        # BLOCK - wrong account
+        sep = "=" * 72
+        cprint("\n" + sep, Fore.RED, bold=True)
+        cprint("  DELETE BLOCKED", Fore.RED, bold=True)
+        cprint(sep, Fore.RED)
+        cprint(f"  Current account  : {current_user}", Fore.RED)
+        cprint(f"  Required account : {self.required_user}", Fore.RED)
+        cprint(f"\n  You must login with the SU account {self.required_user}", Fore.RED)
+        cprint(f"  before cleanup can run.", Fore.RED)
+        cprint("\n  Remediation steps:", Fore.YELLOW)
+        cprint("    az logout", Fore.YELLOW)
+        cprint("    az login --use-device-code", Fore.YELLOW)
+        cprint("    az account show --query user -o table", Fore.YELLOW)
+        cprint(sep, Fore.RED)
+        return False
+
+
+def verify_subscription_context(sub_name: str, required_user: str = "") -> Tuple[str, str, bool]:
+    """Set subscription and verify context. Returns (sub_before, sub_after, success)."""
+    before_info = get_current_subscription_info()
+    sub_before = before_info.get("name", "")
+
+    _, err = run_az(["account", "set", "--subscription", sub_name], timeout=30)
+    if err:
+        cprint(f"  [WARN] Cannot set subscription '{sub_name}': {err[:80]}", Fore.YELLOW)
+        return sub_before, "", False
+
+    after_info = get_current_subscription_info()
+    sub_after = after_info.get("name", "")
+    current_user = get_current_az_user()
+
+    cprint(f"  [SUB] Subscription : {sub_after}", Fore.CYAN)
+    cprint(f"  [USR] Azure CLI User: {current_user}", Fore.CYAN)
+
+    if required_user and current_user.lower() != required_user.lower():
+        cprint(f"  [WARN] User changed unexpectedly to {current_user}!", Fore.RED)
+
+    return sub_before, sub_after, True
+
+
+# ============================================================================
 # EXECUTIVE DASHBOARD
 # ============================================================================
 
@@ -1480,10 +1618,51 @@ def run_pipeline(args):
     if dry_run:
         cprint("  [DRY RUN] No Azure resources will be modified.", Fore.YELLOW, bold=True)
 
+    # --- PREFLIGHT OUTPUT ---
+    _rq_user = getattr(args, "required_user", None) or DEFAULT_REQUIRED_DELETE_USER
+    _cur_user = get_current_az_user()
+    _cur_sub_info = get_current_subscription_info()
+    _input_file = getattr(args, "input", "")
+    _is_delete_mode = (cleanup or getattr(args, "delete_approved", False))
+    cprint("\n  ── Preflight Context ─────────────────────────────────────────────", Fore.CYAN)
+    cprint(f"  Current Azure CLI user  : {_cur_user}", Fore.WHITE)
+    cprint(f"  Required user (delete)  : {_rq_user}", Fore.WHITE)
+    cprint(f"  Current subscription    : {_cur_sub_info.get('name', 'unknown')}", Fore.WHITE)
+    cprint(f"  Target subscriptions    : {', '.join(subscriptions) if subscriptions else 'all'}", Fore.WHITE)
+    cprint(f"  Delete mode             : {'YES' if _is_delete_mode else 'NO'}", Fore.WHITE)
+    cprint(f"  Dry run                 : {'YES' if dry_run else 'NO'}", Fore.WHITE)
+    cprint(f"  Input file              : {_input_file}", Fore.WHITE)
+    cprint(f"  Output dir              : {output_dir}", Fore.WHITE)
+    if terraform_path:
+        cprint(f"  Terraform path          : {terraform_path}", Fore.WHITE)
+    if _is_delete_mode and not dry_run:
+        if _cur_user.lower() != _rq_user.lower():
+            cprint("\n  [BLOCKED] Current user does not match required SU user!", Fore.RED, bold=True)
+            cprint(f"  Current account  : {_cur_user}", Fore.RED)
+            cprint(f"  Required account : {_rq_user}", Fore.RED)
+            cprint("  Run: az logout", Fore.YELLOW)
+            cprint("  Run: az login --use-device-code", Fore.YELLOW)
+            cprint("  Then verify: az account show --query user -o table", Fore.YELLOW)
+            sys.exit(1)
+    cprint("  ──────────────────────────────────────────────────────────────────", Fore.CYAN)
+
     # Preflight
-    preflight = PreflightChecker(required_subscriptions=subscriptions)
+    required_user = getattr(args, "required_user", None) or DEFAULT_REQUIRED_DELETE_USER
+    run_mode = getattr(args, "mode", None)
+    if mode == "cleanup-approved" or getattr(args, "delete_approved", False):
+        run_mode_check = "delete"
+    elif mode == "dry-run":
+        run_mode_check = "report"
+    else:
+        run_mode_check = "report"
+    preflight = PreflightChecker(
+        required_subscriptions=subscriptions,
+        required_user=required_user if (mode == "cleanup-approved" or getattr(args, "delete_approved", False)) else None,
+        mode=run_mode_check,
+    )
     if not preflight.check_all():
         sys.exit(1)
+    current_az_user = get_current_az_user()
 
     # Load config
     cprint("\n  Loading configuration...", Fore.CYAN)
@@ -1606,6 +1785,32 @@ def run_pipeline(args):
             if dry_run:
                 cprint("  [DRY RUN] Simulating deletion...", Fore.YELLOW)
             else:
+                # Bulk validation summary
+                total_rows = len(results)
+                approved_rows = sum(1 for r in results if normalize_bool(r.get("approvedtodelete", "")))
+                missing_ticket = sum(1 for r in safe_resources if not r.get("approvalticket", "").strip())
+                missing_approver = sum(1 for r in safe_resources if not r.get("approvedby", "").strip())
+                excluded_rows = sum(1 for r in results if r.get("classification") == CLASS_DO_NOT_DELETE)
+                review_rows = sum(1 for r in results if r.get("classification") == CLASS_REVIEW_REQUIRED)
+
+                cprint("\n" + "=" * 72, Fore.CYAN)
+                cprint("  BULK DELETE VALIDATION SUMMARY", Fore.CYAN, bold=True)
+                cprint("=" * 72, Fore.CYAN)
+                print(f"  Total rows in input         : {total_rows}")
+                print(f"  Approved rows               : {approved_rows}")
+                cprint(f"  SAFE_DELETE candidates      : {len(safe_resources)}", Fore.GREEN)
+                print(f"  Missing ticket              : {missing_ticket}")
+                print(f"  Missing approver            : {missing_approver}")
+                print(f"  Excluded / DO_NOT_DELETE    : {excluded_rows}")
+                print(f"  REVIEW_REQUIRED             : {review_rows}")
+                cprint("-" * 72, Fore.CYAN)
+                cprint(f"  Current Azure CLI user      : {current_az_user}", Fore.WHITE)
+                cprint(f"  Required SU user            : {required_user}", Fore.WHITE)
+                if current_az_user.lower() != required_user.lower():
+                    cprint("  [BLOCKED] SU account mismatch - cannot continue.", Fore.RED, bold=True)
+                    sys.exit(1)
+                cprint("=" * 72, Fore.CYAN)
+
                 cprint(f"\n  About to delete {len(safe_resources)} resource(s):", Fore.RED, bold=True)
                 for r in safe_resources:
                     print(f"    - {r['resourcename']} ({r['resourcegroup']})")
@@ -1638,6 +1843,12 @@ def run_pipeline(args):
                     "gate_failures": "; ".join(gate_failures),
                     "delete_result": "", "verify_result": "",
                     "backup_path": "", "error_message": "",
+                    "azure_cli_user": "",
+                    "required_user": "",
+                    "subscription_before_delete": "",
+                    "subscription_after_set": "",
+                    "delete_command_used": "",
+                    "delete_method": "",
                     "delete_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "dry_run": dry_run,
                 }
@@ -1651,12 +1862,34 @@ def run_pipeline(args):
                     deletion_results.append(del_result)
                     continue
 
+                # Subscription context verification before deletion
+                sub_before = ""
+                sub_after_set = ""
+                if sub:
+                    sub_before, sub_after_set, sub_ok = verify_subscription_context(sub, required_user)
+                    if not sub_ok:
+                        cprint(f"  [SKIP] Cannot set subscription {sub} - skipping", Fore.RED)
+                        del_result["delete_result"] = "SKIPPED_SUBSCRIPTION_ACCESS"
+                        del_result["error_message"] = f"Cannot set subscription: {sub}"
+                        del_result["subscription_before_delete"] = sub_before
+                        del_result["subscription_after_set"] = "FAILED"
+                        del_result["azure_cli_user"] = get_current_az_user()
+                        del_result["required_user"] = required_user
+                        deletion_results.append(del_result)
+                        continue
+                del_result["subscription_before_delete"] = sub_before
+                del_result["subscription_after_set"] = sub_after_set
+                del_result["azure_cli_user"] = get_current_az_user()
+                del_result["required_user"] = required_user
+
                 backup_path = cleanup_engine.backup_resource(resource, validation)
                 del_result["backup_path"] = backup_path or ""
                 cprint(f"  [BACKUP] {backup_path}", Fore.CYAN)
 
-                delete_status, delete_err = cleanup_engine.delete_resource(resource, validation)
+                delete_status, delete_err, delete_cmd_used, delete_method = cleanup_engine.delete_resource(resource, validation)
                 del_result["delete_result"] = delete_status
+                del_result["delete_command_used"] = delete_cmd_used
+                del_result["delete_method"] = delete_method
                 del_result["error_message"] = delete_err
 
                 if delete_status in ("DELETED", "DRY_RUN_SIMULATED"):
@@ -1669,13 +1902,23 @@ def run_pipeline(args):
                     verify_status, verify_msg = cleanup_engine.verify_deletion(resource)
                     del_result["verify_result"] = verify_status
                     if verify_status == "VERIFIED_GONE":
-                        cprint(f"  [VERIFIED] Gone: {name}", Fore.GREEN)
+                        cprint(f"  DELETED and VERIFIED_GONE: {name}", Fore.GREEN, bold=True)
                     else:
                         cprint(f"  [VERIFY FAILED] {verify_msg}", Fore.RED, bold=True)
+                elif delete_status == "DELETE_FAILED" and delete_err and "RBAC BLOCKED" in delete_err:
+                    cprint(f"  {delete_err}", Fore.RED, bold=True)
 
                 deletion_results.append(del_result)
                 if delete_pause > 0 and not dry_run:
                     time.sleep(delete_pause)
+
+            cprint("\n" + "=" * 72, Fore.CYAN)
+            cprint("  POST-DELETE REMINDER", Fore.CYAN, bold=True)
+            cprint("=" * 72, Fore.CYAN)
+            cprint("  Run the Resource Graph query in docs/RESOURCE_GRAPH_QUERIES.md", Fore.YELLOW)
+            cprint("  to confirm remaining disconnected private endpoints.", Fore.YELLOW)
+            cprint("  Query file: docs/RESOURCE_GRAPH_QUERIES.md", Fore.YELLOW)
+            cprint("=" * 72, Fore.CYAN)
 
             # Write deletion report
             if deletion_results:
@@ -1770,6 +2013,13 @@ example usage:
     parser.add_argument("--self-test", action="store_true",
                        help="Run preflight checks only and exit")
 
+    # SU account enforcement
+    parser.add_argument("--required-user", dest="required_user",
+                        default=DEFAULT_REQUIRED_DELETE_USER,
+                        help=("Required Azure CLI user for delete modes "
+                              f"(default: {DEFAULT_REQUIRED_DELETE_USER}). "
+                              "Script aborts if current user does not match."))
+
     return parser
 
 
@@ -1803,7 +2053,7 @@ def main():
     audit_only = getattr(args, "audit_only", False)
     cleanup_approved = getattr(args, "cleanup_approved", False)
 
-    if mode in ("report", "delete"):
+    if mode in ("report", "delete", "test-delete"):
         # Phase 1 modular pipeline
         run_phase1_pipeline(args)
     elif has_input or audit_only or cleanup_approved:
@@ -1846,8 +2096,9 @@ example usage:
   python main.py --input findings.csv --audit-only
 """
     )
-    p.add_argument('--mode', choices=['report', 'delete'], default=None,
-                   help="Operation mode: 'report' generates reports, 'delete' performs approval-gated cleanup")
+    p.add_argument('--mode', choices=['report', 'delete', 'test-delete'], default=None,
+                   help="Operation mode: 'report' (validate+report), 'delete' (approval-gated cleanup), "
+                        "'test-delete' (safe test deletion of one endpoint to verify CLI permissions)")
     p.add_argument('--resource-type', dest='resource_type',
                    choices=['private-endpoints', 'storage', 'all'],
                    default='private-endpoints',
@@ -1867,6 +2118,19 @@ example usage:
                    help='Simulate all actions without modifying Azure resources')
     p.add_argument('--delete-approved', action='store_true',
                    help='Enable deletion of ApprovedToDelete=Yes resources (requires --mode delete)')
+    p.add_argument('--required-user', dest='required_user',
+                 default=DEFAULT_REQUIRED_DELETE_USER,
+                 help=f'Required Azure CLI user for delete/test-delete modes '
+                      f'(default: {DEFAULT_REQUIRED_DELETE_USER}). '
+                      'Script aborts if current user does not match.')
+    p.add_argument('--name', default=None,
+                 help='Resource name (used with --mode test-delete)')
+    p.add_argument('--resource-group', dest='resource_group_arg', default=None,
+                 help='Resource group (used with --mode test-delete)')
+    p.add_argument('--subscription-arg', dest='subscription_arg', default=None,
+                 help='Subscription name (used with --mode test-delete)')
+    p.add_argument('--allow-terraform-managed', action='store_true',
+                 help='Override Terraform protection gate (use with caution)')
     p.add_argument('--config-dir', dest='config_dir', default='config',
                    help='Config directory (default: config/)')
     p.add_argument('--change-ticket', default='',
@@ -2017,6 +2281,219 @@ def _generate_executive_summary(results, run_meta, output_dir):
     return str(path)
 
 
+def run_test_delete(name: str, resource_group: str,
+                    subscription: str = None, required_user: str = DEFAULT_REQUIRED_DELETE_USER,
+                    output_dir: str = "reports", dry_run: bool = False) -> None:
+    """
+    Safe test deletion of a single private endpoint.
+    Proves that Azure CLI delete works before bulk cleanup.
+    Generates: test_delete_report_<timestamp>.md
+    """
+    run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp_str = ts()
+    ensure_dirs(output_dir)
+
+    sep = "=" * 72
+    cprint("\n" + sep, Fore.CYAN, bold=True)
+    cprint("  TEST-DELETE MODE - Single Endpoint Validation", Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+    cprint("  Endpoint     : " + name, Fore.WHITE)
+    cprint("  RG           : " + resource_group, Fore.WHITE)
+    cprint("  Subscription : " + (subscription or '(current)'), Fore.WHITE)
+    if dry_run:
+        cprint("  [DRY RUN] No Azure resources will be modified.", Fore.YELLOW, bold=True)
+
+    current_user = get_current_az_user()
+    cprint("\n  Step 1: Verify SU account", Fore.CYAN)
+    cprint("  Current Azure CLI user  : " + current_user, Fore.WHITE)
+    cprint("  Required user           : " + required_user, Fore.WHITE)
+
+    report_lines = [
+        "# EDAV Test-Delete Report",
+        "",
+        "**Date:** " + run_date,
+        "**Endpoint:** " + name,
+        "**Resource Group:** " + resource_group,
+        "**Subscription:** " + (subscription or '(current)'),
+        "**Azure CLI User:** " + current_user,
+        "**Required User:** " + required_user,
+        "**Dry Run:** " + ("Yes" if dry_run else "No"),
+        "",
+        "## Steps",
+        "",
+    ]
+
+    if not dry_run and current_user.lower() != required_user.lower():
+        msg = ("DELETE BLOCKED: Azure CLI is currently authenticated as " + current_user +
+               ". You must login with the SU account " + required_user + " before cleanup can run.")
+        cprint("\n  [BLOCKED] " + msg, Fore.RED, bold=True)
+        cprint("  Run: az logout", Fore.YELLOW)
+        cprint("  Run: az login --use-device-code", Fore.YELLOW)
+        cprint("  Then verify: az account show --query user -o table", Fore.YELLOW)
+        report_lines.append("### Step 1: SU Account - FAILED")
+        report_lines.append("- " + msg)
+        _write_test_report(report_lines, output_dir, timestamp_str)
+        sys.exit(1)
+    report_lines.append("### Step 1: SU Account - PASS")
+    report_lines.append("- Current user: " + current_user)
+    cprint("  [PASS] SU account confirmed", Fore.GREEN)
+
+    cprint("\n  Step 2: Set subscription context", Fore.CYAN)
+    sub_after = ""
+    if subscription:
+        sub_before, sub_after, sub_ok = verify_subscription_context(subscription, required_user)
+        if not sub_ok:
+            msg = "Cannot set subscription: " + subscription
+            cprint("  [FAIL] " + msg, Fore.RED)
+            report_lines.append("### Step 2: Subscription Context - FAILED")
+            report_lines.append("- " + msg)
+            _write_test_report(report_lines, output_dir, timestamp_str)
+            sys.exit(1)
+        report_lines.append("### Step 2: Subscription Context - PASS")
+        report_lines.append("- Subscription set to: " + sub_after)
+        cprint("  [PASS] Subscription: " + sub_after, Fore.GREEN)
+    else:
+        sub_info = get_current_subscription_info()
+        sub_after = sub_info.get("name", "")
+        report_lines.append("### Step 2: Subscription Context")
+        report_lines.append("- Using current subscription: " + sub_after)
+        cprint("  Using current subscription: " + sub_after, Fore.WHITE)
+
+    cprint("\n  Step 3: Validate endpoint exists and check connection state", Fore.CYAN)
+    validator = AzureValidator()
+    fake_resource = {
+        "resourcename": name, "resourcegroup": resource_group,
+        "subscription": subscription or sub_after,
+        "resourcetype": "Microsoft.Network/privateEndpoints",
+        "resourceid": "", "approvedtodelete": "Yes",
+        "approvalticket": "TEST", "approvedby": "test-delete-mode",
+    }
+    validation = validator.validate(fake_resource)
+
+    if validation.get("resource_exists") is False:
+        cprint("  [SKIP] Endpoint " + name + " not found - may already be deleted", Fore.YELLOW)
+        report_lines.append("### Step 3: Endpoint Validation")
+        report_lines.append("- Endpoint not found: " + name + " (ResourceNotFound)")
+        _write_test_report(report_lines, output_dir, timestamp_str)
+        return
+    if validation.get("resource_exists") is None:
+        cprint("  [WARN] Could not validate: " + validation.get("validation_notes", ""), Fore.YELLOW)
+    else:
+        cprint("  [OK] Endpoint exists: " + name, Fore.GREEN)
+
+    conn_state = validation.get("connection_state", "Unknown")
+    backend_id = validation.get("backend_resource_id", "")
+    cprint("  Connection state : " + conn_state, Fore.WHITE)
+    cprint("  Backend ID       : " + (backend_id[:80] if backend_id else "(none)"), Fore.WHITE)
+    report_lines.append("### Step 3: Endpoint Validation - PASS")
+    report_lines.append("- Exists: True")
+    report_lines.append("- Connection state: " + conn_state)
+    report_lines.append("- Backend resource ID: " + backend_id)
+
+    cprint("\n  Step 4: Delete confirmation", Fore.CYAN)
+    if not dry_run:
+        cprint("\n  You are about to DELETE: " + name, Fore.RED, bold=True)
+        cprint("  Resource Group: " + resource_group, Fore.RED)
+        cprint("  Subscription  : " + sub_after, Fore.RED)
+        cprint("  Connection    : " + conn_state, Fore.RED)
+        confirm = input("\n  Type CONFIRM to delete (anything else aborts): ").strip()
+        if confirm != "CONFIRM":
+            cprint("  Aborted. No resources deleted.", Fore.YELLOW)
+            report_lines.append("### Step 4: CONFIRM - ABORTED by user")
+            _write_test_report(report_lines, output_dir, timestamp_str)
+            return
+        report_lines.append("### Step 4: CONFIRM - CONFIRMED by user")
+    else:
+        cprint("  [DRY RUN] Skipping CONFIRM prompt", Fore.YELLOW)
+        report_lines.append("### Step 4: CONFIRM - DRY RUN (skipped)")
+
+    cprint("\n  Step 5: Delete endpoint", Fore.CYAN)
+    resource_id = ""
+    if validation.get("raw_data"):
+        resource_id = (validation["raw_data"].get("id") or "")
+
+    cleanup_engine = CleanupEngine(backup_dir="backups", dry_run=dry_run)
+    backup_path = cleanup_engine.backup_resource(fake_resource, validation)
+    cprint("  [BACKUP] " + str(backup_path), Fore.CYAN)
+
+    if not dry_run:
+        if resource_id:
+            cmd = ["network", "private-endpoint", "delete", "--ids", resource_id]
+            delete_method = "ids"
+        else:
+            cmd = ["network", "private-endpoint", "delete",
+                   "--name", name, "--resource-group", resource_group]
+            delete_method = "name_rg"
+        cmd_str = "az " + " ".join(cmd)
+        cprint("  [DELETE] " + cmd_str, Fore.YELLOW)
+        cprint("  [METHOD] " + delete_method, Fore.YELLOW)
+        _, err = run_az(cmd, timeout=120)
+        if err and err != "ResourceNotFound":
+            if "AuthorizationFailed" in (err or "") or "does not have authorization" in (err or "").lower():
+                rbac_msg = ("RBAC BLOCKED: account does not have "
+                            "Microsoft.Network/privateEndpoints/delete on this scope.")
+                cprint("  [FAIL] " + rbac_msg, Fore.RED, bold=True)
+                report_lines.append("### Step 5: Delete - FAILED (RBAC)")
+                report_lines.append("- Command: " + cmd_str)
+                report_lines.append("- Error: " + rbac_msg)
+                _write_test_report(report_lines, output_dir, timestamp_str)
+                return
+            cprint("  [FAIL] Delete error: " + (err or "")[:200], Fore.RED)
+            report_lines.append("### Step 5: Delete - FAILED")
+            report_lines.append("- Command: " + cmd_str)
+            report_lines.append("- Error: " + (err or "")[:200])
+            _write_test_report(report_lines, output_dir, timestamp_str)
+            return
+        cprint("  [OK] Delete command executed", Fore.GREEN)
+        report_lines.append("### Step 5: Delete - EXECUTED")
+        report_lines.append("- Command: " + cmd_str)
+        report_lines.append("- Method: " + delete_method)
+
+        cprint("\n  Step 6: Verify ResourceNotFound", Fore.CYAN)
+        time.sleep(3)
+        verify_status, verify_msg = cleanup_engine.verify_deletion(fake_resource)
+        if verify_status == "VERIFIED_GONE":
+            cprint("  DELETED and VERIFIED_GONE: " + name, Fore.GREEN, bold=True)
+            report_lines.append("### Step 6: Verification - VERIFIED_GONE")
+            report_lines.append("- Azure confirmed ResourceNotFound for: " + name)
+        else:
+            cprint("  [WARN] Verification: " + verify_status + " - " + verify_msg, Fore.YELLOW)
+            report_lines.append("### Step 6: Verification - " + verify_status)
+            report_lines.append("- " + verify_msg)
+    else:
+        report_lines.append("### Step 5: Delete - DRY RUN (not executed)")
+        report_lines.append("### Step 6: Verification - DRY RUN (skipped)")
+        cprint("  [DRY RUN] Delete and verify skipped", Fore.YELLOW)
+
+    report_lines += [
+        "",
+        "## Post-Delete",
+        "",
+        "Run the Resource Graph query in docs/RESOURCE_GRAPH_QUERIES.md to confirm",
+        "remaining disconnected private endpoints.",
+        "",
+        "Query for this specific endpoint:",
+        "  Resources",
+        "  | where type =~ 'microsoft.network/privateendpoints'",
+        "  | where name =~ '" + name + "'",
+    ]
+
+    _write_test_report(report_lines, output_dir, timestamp_str)
+    cprint("\n  Test-delete report written to: " + output_dir + "/", Fore.GREEN)
+
+
+def _write_test_report(lines: List[str], output_dir: str, timestamp_str: str) -> None:
+    """Write test_delete_report to output_dir."""
+    ensure_dirs(output_dir)
+    path = Path(output_dir) / ("test_delete_report_" + timestamp_str + ".md")
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+        cprint("  Test report: " + str(path), Fore.GREEN)
+    except Exception as e:
+        cprint("  [WARN] Test report write failed: " + str(e), Fore.YELLOW)
+
+
 def run_phase1_pipeline(args):
     """
     Phase 1 modular pipeline entry point.
@@ -2035,6 +2512,8 @@ def run_phase1_pipeline(args):
     config_dir = getattr(args, 'config_dir', 'config')
     change_ticket = getattr(args, 'change_ticket', '') or ''
     approved_by = getattr(args, 'approved_by', '') or ''
+    required_user = getattr(args, 'required_user', None) or DEFAULT_REQUIRED_DELETE_USER
+    allow_terraform = getattr(args, 'allow_terraform_managed', False)
 
     ensure_dirs(output_dir, 'team_reports', 'logs', 'backups')
 
@@ -2084,8 +2563,46 @@ def run_phase1_pipeline(args):
             }
             _generate_executive_summary([], run_meta, output_dir)
 
+    # test-delete mode - single resource safe test
+    elif mode == 'test-delete':
+        name_arg = getattr(args, 'name', None)
+        rg_arg = getattr(args, 'resource_group_arg', None)
+        sub_arg = getattr(args, 'subscription_arg', None)
+
+        if not name_arg or not rg_arg:
+            cprint('\n[ERROR] --mode test-delete requires --name and --resource-group', Fore.RED, bold=True)
+            cprint('  Example:', Fore.YELLOW)
+            cprint('  python main.py --mode test-delete --resource-type private-endpoints \\', Fore.YELLOW)
+            cprint('    --name testwebbseries-pe --resource-group ocio-network \\', Fore.YELLOW)
+            cprint('    --subscription OCIO-TSBDEV-C1 --required-user bh55-su@cdc.gov', Fore.YELLOW)
+            sys.exit(1)
+
+        run_test_delete(
+            name=name_arg, resource_group=rg_arg,
+            subscription=sub_arg, required_user=required_user,
+            output_dir=output_dir, dry_run=dry_run,
+        )
+
     # Delete mode
     elif mode == 'delete':
+        # SU Account enforcement
+        current_user = get_current_az_user()
+        if not dry_run:
+            if current_user.lower() != required_user.lower():
+                cprint('\n' + '=' * 72, Fore.RED, bold=True)
+                cprint('  DELETE BLOCKED: SU account required', Fore.RED, bold=True)
+                cprint('=' * 72, Fore.RED)
+                cprint(f'  Current account  : {current_user}', Fore.RED)
+                cprint(f'  Required account : {required_user}', Fore.RED)
+                cprint(f'\n  You must login with the SU account {required_user}', Fore.RED)
+                cprint('  before cleanup can run.', Fore.RED)
+                cprint('\n  Remediation steps:', Fore.YELLOW)
+                cprint('    az logout', Fore.YELLOW)
+                cprint('    az login --use-device-code', Fore.YELLOW)
+                cprint('    az account show --query user -o table', Fore.YELLOW)
+                cprint('=' * 72, Fore.RED)
+                sys.exit(1)
+
         if not delete_approved:
             cprint('\n[ERROR] --mode delete requires --delete-approved flag.', Fore.RED, bold=True)
             cprint('  Safety rule: Deletion NEVER runs without --delete-approved.', Fore.RED)
