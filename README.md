@@ -607,6 +607,175 @@ python main.py --input inputs/approved.csv --subscriptions "SUB1" --cleanup-appr
                                                                                                          
 
 
+
+
+---
+
+## EDAV Resource Governance Scan
+
+The platform now supports broad Azure Resource Governance scanning via Azure Resource Graph.
+
+### What It Scans
+
+| Category | Query | Classification Logic |
+|----------|-------|---------------------|
+| Disconnected Private Endpoints | Disconnected/Rejected state | SAFE_DELETE (non-prod), REVIEW (prod) |
+| Unattached NSGs | No NIC or subnet associations | REVIEW_REQUIRED always |
+| Unattached Managed Disks | managedBy = null | SAFE_DELETE (non-prod, non-backup) |
+| Unattached Public IPs | No ipConfiguration | SAFE_DELETE (non-prod, non-AKS) |
+| Unattached NICs | No VM attached | KEEP if Azure-managed; REVIEW otherwise |
+| Stopped / Deallocated VMs | powerState = stopped/deallocated | REVIEW_REQUIRED |
+| Event Grid - No Subscriptions | eventSubscriptionCount = 0 | REVIEW_REQUIRED |
+| Storage Accounts | All storage | REVIEW_REQUIRED |
+| AKS / Databricks Resources | mc_* or databricks-rg-* RGs | KEEP (Azure-managed) |
+
+---
+
+### How to Run the Governance Scan
+
+```bash
+python main.py --scan-governance \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1" \
+  --output-dir reports/governance/
+```
+
+**Filter to a specific resource type:**
+```bash
+python main.py --scan-governance \
+  --governance-query disconnected_private_endpoints \
+  --subscriptions "OCIO-TSBDEV-C1"
+```
+
+**Available query filters:**
+- `disconnected_private_endpoints`
+- `unattached_nsgs`
+- `unattached_disks`
+- `unattached_public_ips`
+- `unattached_nics`
+- `stopped_vms`
+- `eventgrid_no_subscriptions`
+- `storage_review`
+- `aks_databricks_resources`
+
+---
+
+### Governance Scan Output
+
+Each scan generates these files in `--output-dir`:
+
+| File | Contents |
+|------|----------|
+| `EDAV_Governance_Findings_<ts>.xlsx` | Multi-tab Excel: SAFE_DELETE, REVIEW_REQUIRED, KEEP, per-category, Summary |
+| `EDAV_Governance_Full_Findings_<ts>.csv` | All results flat CSV |
+| `EDAV_Governance_Executive_Summary_<ts>.md` | Markdown summary with tables |
+| `EDAV_Governance_Dashboard_<ts>.html` | HTML dashboard with color-coded table |
+| `EDAV_Governance_Full_Report_<ts>.json` | Full JSON with metadata |
+
+**Report columns:** ResourceName, ResourceType, ResourceGroup, Subscription, Location,
+Classification, Reason, OwnerTeam, TerraformManaged, AzureManaged, SafeDeleteEligible,
+ApprovalRequired, RecommendedAction, ScanTimestamp, QueryCategory, ConnectionState,
+DiskState, DiskSizeGB, SKU, PowerState, Tags, ApprovedToDelete, ApprovalTicket, ApprovedBy
+
+---
+
+### NIC Safety — Critical Rule
+
+> **An unattached NIC does NOT mean it is orphaned or safe to delete.**
+
+Many NICs are Azure-managed and **must be classified as KEEP**:
+
+| Pattern | Service | Action |
+|---------|---------|--------|
+| Name ends with `-pe-nic` | Private Endpoints | **KEEP** |
+| Name contains `.nic.` | Private Endpoints | **KEEP** |
+| Name contains `kube-apiserver` | AKS control plane | **KEEP** |
+| Name contains `aksnode` or `aks-` | AKS node NICs | **KEEP** |
+| Name contains `databricks` | Databricks cluster | **KEEP** |
+| Name contains `appgw` or `agw` | App Gateway | **KEEP** |
+| Resource group starts with `mc_` | AKS managed RG | **KEEP** |
+| Resource group starts with `databricks-rg-` | Databricks managed RG | **KEEP** |
+
+The governance scanner automatically applies all these patterns.
+**Never manually delete a NIC without confirming it is not Azure-managed.**
+
+---
+
+### How to Interpret Classifications
+
+| Classification | Meaning | Action |
+|----------------|---------|--------|
+| **SAFE_DELETE** | Non-prod, unattached, no dependencies, eligible | Collect approval, run delete mode |
+| **REVIEW_REQUIRED** | PRD, backup, unknown owner, Terraform-managed | Owner review before any action |
+| **KEEP** | Azure-managed (AKS, Databricks, PE), or in use | Do NOT delete |
+| **DO_NOT_DELETE** | Production, locked, TF-managed, explicit block | Blocked from all deletion |
+| **RESOURCE_NOT_FOUND** | Already removed | No action needed |
+| **UNKNOWN** | Cannot determine state | Manual investigation |
+
+**SAFE_DELETE requires ALL of these before deletion:**
+1. Classification = SAFE_DELETE
+2. Non-production environment
+3. Not Terraform-managed
+4. No Azure resource lock
+5. ApprovedToDelete = Yes
+6. ApprovalTicket populated (CHGxxxxxxx)
+7. ApprovedBy populated
+8. Azure CLI user = bh55-su@cdc.gov (SU account)
+9. Type CONFIRM at interactive prompt
+
+---
+
+### How to Run Private Endpoint Cleanup
+
+After the governance scan identifies disconnected endpoints:
+
+```bash
+# Step 1: Login with SU account
+az logout
+az login --use-device-code     # Sign in as bh55-su@cdc.gov
+az account show --query user -o table
+
+# Step 2: Test CLI on one endpoint (prove permissions)
+python main.py --mode test-delete \
+  --name <endpoint-name> --resource-group <rg> \
+  --subscription OCIO-TSBDEV-C1 \
+  --required-user bh55-su@cdc.gov
+
+# Step 3: Dry-run bulk delete
+python main.py --mode delete --resource-type private-endpoints \
+  --input approved_deletions.xlsx \
+  --delete-approved --dry-run \
+  --required-user bh55-su@cdc.gov
+
+# Step 4: Live delete (SU account required)
+python main.py --mode delete --resource-type private-endpoints \
+  --input approved_deletions.xlsx \
+  --delete-approved \
+  --required-user bh55-su@cdc.gov \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --change-ticket CHG0012345 --approved-by "Linda Johnson"
+```
+
+---
+
+### How to Run Resource Graph Validation
+
+After cleanup, validate in the Azure Resource Graph Explorer or CLI:
+
+```bash
+az graph query -q "
+Resources
+| where type =~ 'microsoft.network/privateendpoints'
+| mv-expand connections = properties.privateLinkServiceConnections
+| extend connectionState = tostring(connections.properties.privateLinkServiceConnectionState.status)
+| where isnull(connectionState) or connectionState !in~ ('Approved','Connected')
+| project name, resourceGroup, subscriptionId, connectionState
+| order by resourceGroup asc
+" --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" --output table
+```
+
+See `docs/RESOURCE_GRAPH_QUERIES.md` for the complete query library.
+
+
 ---
 
 ## Running Cleanup with SU Account
