@@ -605,3 +605,137 @@ python main.py --input inputs/approved.csv --subscriptions "SUB1" --cleanup-appr
                                                                                                          *Built for the EDAV Platform Team at CDC*
                                                                                                          *Nothing is deleted without validation, approval, a change ticket, an approver, and a typed CONFIRM.*
                                                                                                          
+
+
+---
+
+## Running Cleanup with SU Account
+
+### Why SU Account is Required
+
+Azure private endpoint delete operations require the `Microsoft.Network/privateEndpoints/delete`
+RBAC permission. Your standard account (`bh55@cdc.gov`) does not have this permission on
+EDAV production subscriptions. Your SU account (`bh55-su@cdc.gov`) has Contributor or
+Network Contributor role and can perform deletions.
+
+**Previous failures:** The cleanup script failed because:
+1. It used `--yes` on `az network private-endpoint delete` (unsupported flag) — **fixed in v6.1.0**
+2. It ran under `bh55@cdc.gov` (insufficient permissions) — **enforced in v6.1.0**
+
+Manual Portal deletion at `bh55-su@cdc.gov` succeeded, confirming the SU account works.
+
+---
+
+### How to Verify Your Active Azure CLI Account
+
+```bash
+az account show --query user.name -o tsv
+```
+
+Should return: `bh55-su@cdc.gov`
+
+### How to Login with SU Account
+
+```bash
+az logout
+az login --use-device-code
+az account show --query user -o table
+```
+
+---
+
+### Report Mode (No SU Account Required)
+
+```bash
+python main.py \
+  --mode report \
+  --resource-type private-endpoints \
+  --input inputs/findings_2026-06.csv \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --output-dir reports/2026-06/
+```
+
+---
+
+### Test-Delete Mode (Prove CLI Works on One Endpoint)
+
+Run this before bulk cleanup to confirm CLI deletion permissions:
+
+```bash
+python main.py \
+  --mode test-delete \
+  --resource-type private-endpoints \
+  --name testwebbseries-pe \
+  --resource-group ocio-network \
+  --subscription OCIO-TSBDEV-C1 \
+  --required-user bh55-su@cdc.gov
+```
+
+The script will confirm SU account, set subscription, show endpoint, ask for CONFIRM,
+delete the endpoint (using `az network private-endpoint delete` without `--yes`),
+and verify ResourceNotFound. A `test_delete_report_<timestamp>.md` is written.
+
+---
+
+### Live Delete Mode (SU Account Required)
+
+```bash
+# Always dry-run first
+python main.py \
+  --mode delete \
+  --resource-type private-endpoints \
+  --input "C:\\Users\\bh55\\Desktop\\EDAV_Approved_Private_Endpoint_Deletions.xlsx" \
+  --delete-approved \
+  --dry-run \
+  --required-user "bh55-su@cdc.gov"
+
+# Live delete (requires SU account + CONFIRM prompt)
+python main.py \
+  --mode delete \
+  --resource-type private-endpoints \
+  --input "C:\\Users\\bh55\\Desktop\\EDAV_Approved_Private_Endpoint_Deletions.xlsx" \
+  --delete-approved \
+  --required-user "bh55-su@cdc.gov" \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
+  --change-ticket CHG0012345 \
+  --approved-by "Linda Johnson"
+```
+
+> **Safety:** If you run delete mode while logged in as `bh55@cdc.gov`, the script
+> **aborts immediately** before touching any resource and prints remediation steps.
+
+---
+
+### Resource Graph Validation After Deletion
+
+After cleanup, run this query in the Azure Resource Graph Explorer to confirm
+remaining disconnected private endpoints:
+
+```kql
+Resources
+| where type =~ 'microsoft.network/privateendpoints'
+| mv-expand connections = properties.privateLinkServiceConnections
+| extend connectionState = tostring(connections.properties.privateLinkServiceConnectionState.status)
+| extend privateLinkServiceId = tostring(connections.properties.privateLinkServiceId)
+| extend rg = resourceGroup
+| where isnull(connectionState) or connectionState !in~ ('Approved','Connected')
+| project name, resourceGroup=rg, subscriptionId, connectionState, privateLinkServiceId
+| order by resourceGroup asc, name asc
+```
+
+See `docs/RESOURCE_GRAPH_QUERIES.md` for the full query library.
+See `docs/SU_ACCOUNT_CLEANUP_RUNBOOK.md` for the complete cleanup runbook.
+
+---
+
+### New CLI Arguments (v6.1.0)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--required-user` | `bh55-su@cdc.gov` | Required Azure CLI user for delete/test-delete modes |
+| `--mode test-delete` | — | Safe single-endpoint test deletion |
+| `--name` | — | Endpoint name (test-delete mode) |
+| `--resource-group` | — | Resource group (test-delete mode) |
+| `--subscription-arg` | — | Subscription (test-delete mode) |
+| `--allow-terraform-managed` | false | Override Terraform protection gate |
+
