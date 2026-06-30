@@ -55,6 +55,9 @@ try:
         CLS_KEEP, CLS_SAFE_DELETE, CLS_REVIEW,
         CLS_DO_NOT_DELETE, CLS_NOT_FOUND, CLS_UNKNOWN,
         RECOMMENDED_ACTIONS,
+        QUERY_MODE_AUTO, QUERY_MODE_CLI, QUERY_MODE_REST, QUERY_MODE_CSV,
+        QUERY_SOURCE_CLI, QUERY_SOURCE_REST, QUERY_SOURCE_CSV,
+        get_manual_csv_instructions,
     )
     GOVERNANCE_SCANNER_AVAILABLE = True
 except ImportError:
@@ -2421,6 +2424,20 @@ example usage:
   python main.py --scan-governance --governance-query unattached_nics \
     --subscriptions "OCIO-TSBDEV-C1"
 
+  # Governance scan - az rest fallback (no resource-graph extension needed)
+  python main.py --scan-governance --query-mode rest \
+    --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
+
+  # Governance scan - manual CSV mode (for restricted CDC VDIs with SSL issues)
+  python main.py --scan-governance --query-mode csv \
+    --manual-private-endpoints-csv pe_results.csv \
+    --manual-nics-csv nic_results.csv \
+    --manual-disks-csv disk_results.csv
+
+  # Governance scan - auto mode with CSV fallback folder
+  python main.py --scan-governance --query-mode auto \
+    --manual-input-dir "C:\\Users\\bh55\\Desktop\\rg_exports"
+
   # Test-delete mode (single endpoint, safe)
   python main.py --mode test-delete --resource-type private-endpoints \
     --name testwebbseries-pe --resource-group ocio-network \
@@ -2472,6 +2489,29 @@ example usage:
     p.add_argument('--governance-query', dest='governance_query', default=None,
                  help='Filter governance scan to a specific query category '
                       '(e.g. unattached_nics, disconnected_private_endpoints)')
+    p.add_argument('--query-mode', dest='query_mode', default='auto',
+                 choices=['auto', 'cli', 'rest', 'csv'],
+                 help='Resource Graph query mode. '
+                      'auto: try az graph, fall back to az rest, then manual CSV. '
+                      'cli: requires resource-graph extension. '
+                      'rest: az rest POST - works WITHOUT resource-graph extension. '
+                      'csv: manually exported CSV files from Azure Portal. '
+                      'Use rest on CDC VDIs where SSL blocks extension install.')
+    p.add_argument('--manual-input-dir', dest='manual_input_dir', default=None,
+                 help='Directory of manually exported Resource Graph CSV files. '
+                      'Files matched by name (pe*.csv, nic*.csv, disk*.csv, etc.).')
+    p.add_argument('--manual-private-endpoints-csv', dest='manual_private_endpoints_csv',
+                 default=None,
+                 help='CSV for disconnected private endpoints (Azure Portal Resource Graph export).')
+    p.add_argument('--manual-nsg-csv', dest='manual_nsg_csv', default=None,
+                 help='CSV for unattached NSGs (Azure Portal Resource Graph export).')
+    p.add_argument('--manual-disks-csv', dest='manual_disks_csv', default=None,
+                 help='CSV for unattached managed disks (Azure Portal Resource Graph export).')
+    p.add_argument('--manual-publicips-csv', dest='manual_publicips_csv', default=None,
+                 help='CSV for unattached public IPs (Azure Portal Resource Graph export).')
+    p.add_argument('--manual-nics-csv', dest='manual_nics_csv', default=None,
+                 help='CSV for unattached NICs (Azure Portal export). '
+                      'NIC classification (KEEP/REVIEW) still applied automatically.')
     p.add_argument('--config-dir', dest='config_dir', default='config',
                    help='Config directory (default: config/)')
     p.add_argument('--change-ticket', default='',
@@ -2842,6 +2882,17 @@ def run_governance_scan(args) -> None:
     stopped VMs, Event Grid topics, storage, AKS/Databricks resources.
     Generates: CSV, Excel (multi-tab), Markdown, HTML, JSON reports.
 
+    Query execution priority (--query-mode):
+      auto (default) - try az graph CLI, fall back to az rest,
+                       fall back to manual CSV if --manual-*-csv provided
+      cli            - az graph query only (requires resource-graph extension)
+      rest           - az rest POST only (no extension required)
+      csv            - manual CSV exports from Azure Portal only
+
+    On restricted CDC VDIs where az graph extension cannot be installed:
+      Use --query-mode rest (no extension needed) or
+      Use --query-mode csv with manually exported CSV files.
+
     Usage:
       python main.py --scan-governance \
         --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1" \
@@ -2860,6 +2911,40 @@ def run_governance_scan(args) -> None:
     dry_run = getattr(args, "dry_run", False)
     query_filter = getattr(args, "governance_query", None)  # optional filter
     terraform_path = getattr(args, "terraform_path", None)
+    query_mode = getattr(args, "query_mode", QUERY_MODE_AUTO) or QUERY_MODE_AUTO
+    manual_input_dir = getattr(args, "manual_input_dir", None)
+
+    # Build manual CSV paths dict from CLI args
+    # Supports both individual --manual-*-csv args and a --manual-input-dir directory
+    manual_csv_paths = {}
+    _manual_map = {
+        "disconnected_private_endpoints": getattr(args, "manual_private_endpoints_csv", None),
+        "unattached_nsgs":               getattr(args, "manual_nsg_csv", None),
+        "unattached_disks":              getattr(args, "manual_disks_csv", None),
+        "unattached_public_ips":         getattr(args, "manual_publicips_csv", None),
+        "unattached_nics":               getattr(args, "manual_nics_csv", None),
+    }
+    for qkey, csv_path in _manual_map.items():
+        if csv_path:
+            manual_csv_paths[qkey] = csv_path
+    # If --manual-input-dir is given, auto-discover CSVs by name pattern
+    if manual_input_dir:
+        from pathlib import Path as _Path
+        _dir = _Path(manual_input_dir)
+        _auto_map = {
+            "disconnected_private_endpoints": ["pe*", "*private*endpoint*", "*privateendpoint*"],
+            "unattached_nsgs":               ["nsg*", "*security*group*"],
+            "unattached_disks":              ["disk*", "*managed*disk*"],
+            "unattached_public_ips":         ["pip*", "*public*ip*"],
+            "unattached_nics":               ["nic*", "*network*interface*"],
+        }
+        for qkey, patterns in _auto_map.items():
+            if qkey not in manual_csv_paths:
+                for pat in patterns:
+                    matches = list(_dir.glob(pat + ".csv")) + list(_dir.glob(pat + ".CSV"))
+                    if matches:
+                        manual_csv_paths[qkey] = str(matches[0])
+                        break
 
     ensure_dirs(output_dir, "team_reports", "logs")
 
@@ -2877,8 +2962,13 @@ def run_governance_scan(args) -> None:
     # Verify az graph extension is available
     cur_user = get_current_az_user()
     cur_sub = get_current_subscription_info()
-    cprint("  Azure CLI user : " + (cur_user or "unknown"), Fore.WHITE)
-    cprint("  Current sub    : " + (cur_sub.get("name") or "unknown"), Fore.WHITE)
+    cprint("  Azure CLI user  : " + (cur_user or "unknown"), Fore.WHITE)
+    cprint("  Current sub     : " + (cur_sub.get("name") or "unknown"), Fore.WHITE)
+    cprint("  Query mode      : " + query_mode.upper(), Fore.WHITE)
+    if manual_csv_paths:
+        cprint("  Manual CSVs     : " + str(len(manual_csv_paths)) + " file(s) provided", Fore.WHITE)
+        for _qk, _cp in manual_csv_paths.items():
+            cprint("    " + _qk + " -> " + _cp, Fore.WHITE)
     cprint(sep, Fore.CYAN)
 
     # Determine which queries to run
@@ -2888,10 +2978,22 @@ def run_governance_scan(args) -> None:
 
     cprint("\n  Running " + str(len(query_keys)) + " governance queries...", Fore.CYAN)
 
+    # Print query source info if CSV mode
+    if query_mode == QUERY_MODE_CSV and not manual_csv_paths:
+        cprint("\n[WARN] --query-mode csv selected but no --manual-*-csv files provided.", Fore.YELLOW, bold=True)
+        cprint("  Use --manual-private-endpoints-csv, --manual-nics-csv, etc.", Fore.YELLOW)
+        cprint("  Or use --manual-input-dir to auto-discover CSVs.", Fore.YELLOW)
+        cprint("  Example:", Fore.YELLOW)
+        cprint("    python main.py --scan-governance --query-mode csv \\", Fore.YELLOW)
+        cprint("      --manual-private-endpoints-csv pe_results.csv \\", Fore.YELLOW)
+        cprint("      --manual-nics-csv nic_results.csv", Fore.YELLOW)
+
     scanner = GovernanceScanner(
         subscriptions=subscriptions,
         query_keys=query_keys,
         terraform_path=terraform_path,
+        query_mode=query_mode,
+        manual_csv_paths=manual_csv_paths,
     )
 
     all_results, summary = scanner.scan()
@@ -2910,13 +3012,23 @@ def run_governance_scan(args) -> None:
 
         if err:
             cprint("  [ERROR] " + display + ": " + str(err)[:80], Fore.RED)
+            if any(x in str(err).lower() for x in [
+                "not found", "extension", "could not find", "unrecognized"
+            ]):
+                cprint("     -> az graph extension missing.", Fore.YELLOW)
+                cprint("     -> Try: python main.py --scan-governance --query-mode rest", Fore.YELLOW)
+            elif "ssl" in str(err).lower() or "certificate" in str(err).lower():
+                cprint("     -> SSL/cert error. Try: --query-mode rest", Fore.YELLOW)
+                cprint("     -> Or export manually: see docs/RESOURCE_GRAPH_QUERIES.md", Fore.YELLOW)
             continue
 
         safe_n = cls_counts.get("SAFE_DELETE", 0)
         review_n = cls_counts.get("REVIEW_REQUIRED", 0)
         keep_n = cls_counts.get("KEEP", 0)
 
-        line = "  " + display.ljust(45) + " | Total: " + str(count).rjust(4)
+        source = qr.get("query_source", "")
+        source_tag = " [" + source + "]" if source else ""
+        line = "  " + display.ljust(45) + " | Total: " + str(count).rjust(4) + source_tag
         if safe_n:
             line += " | SAFE_DELETE: " + str(safe_n)
         if review_n:
