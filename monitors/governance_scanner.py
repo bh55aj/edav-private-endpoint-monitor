@@ -588,9 +588,10 @@ def run_resource_graph_query(
     # --- CSV mode: only use manual CSV ---
     if query_mode == QUERY_MODE_CSV:
         if not manual_csv_path:
-            return [], ("No CSV file provided for query_key=" + query_key +
-                        ". Use --manual-" + query_key.replace("_", "-") + "-csv <path>"),
-                   QUERY_SOURCE_NONE
+            return [], (
+                "No CSV file provided for query_key=" + query_key +
+                ". Use --manual-" + query_key.replace("_", "-") + "-csv <path>"
+            ), QUERY_SOURCE_NONE
         rows, err = _load_manual_csv(manual_csv_path, query_key)
         if err:
             return [], err, QUERY_SOURCE_NONE
