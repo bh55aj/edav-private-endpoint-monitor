@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ============================================================================
-EDAV Resource Monitor Cleanup Platform - v6.1.0
+EDAV Resource Monitor Cleanup Platform - v7.0.0
 ============================================================================
 Enterprise Azure governance, cost-reduction, and safe cleanup platform
 for the EDAV Resource Monitor dashboard.
@@ -63,6 +63,23 @@ try:
 except ImportError:
     GOVERNANCE_SCANNER_AVAILABLE = False
 
+# Resource Monitor integration & PE cleanup pipeline
+try:
+    from engines.resource_monitor_reader import (
+        ResourceMonitorReader, read_resource_monitor_export,
+        ResourceMonitorFinding,
+    )
+    from engines.pe_pipeline import (
+        PrivateEndpointPipeline, EnrichedEndpoint,
+        CLS_SAFE_DELETE as PE_CLS_SAFE_DELETE,
+        CLS_REVIEW_REQUIRED as PE_CLS_REVIEW,
+        CLS_ALREADY_REMOVED, CLS_KEEP as PE_CLS_KEEP,
+        DEFAULT_REQUIRED_USER as PE_DEFAULT_USER,
+    )
+    PE_PIPELINE_AVAILABLE = True
+except ImportError:
+    PE_PIPELINE_AVAILABLE = False
+
 try:
     import pandas as pd
 except ImportError:
@@ -95,7 +112,7 @@ except ImportError:
 # CONSTANTS
 # ============================================================================
 
-VERSION = "6.1.0"
+VERSION = "7.0.0"
 TOOL_NAME = "EDAV Resource Monitor Cleanup Platform"
 DASHBOARD_URL = "https://internal-resource-monitor.edav.cdc.gov/dashboard"
 
@@ -2367,6 +2384,12 @@ def main():
     audit_only = getattr(args, "audit_only", False)
     cleanup_approved = getattr(args, "cleanup_approved", False)
 
+    # Resource Monitor cleanup pipeline (new)
+    cleanup_pe = getattr(args, "cleanup_private_endpoints", False)
+    if cleanup_pe:
+        run_cleanup_private_endpoints(args)
+        return
+
     # Governance scan mode (new)
     scan_gov = getattr(args, "scan_governance", False)
     if scan_gov:
@@ -2423,6 +2446,29 @@ example usage:
   # Governance scan - specific query
   python main.py --scan-governance --governance-query unattached_nics \
     --subscriptions "OCIO-TSBDEV-C1"
+
+  # Resource Monitor cleanup pipeline:
+
+  # Step 1: Preview what will be deleted (no deletions)
+  python main.py --cleanup-private-endpoints \\
+    --import-resource-monitor DisconnectedPEs.xlsx \\
+    --preview-cleanup
+
+  # Step 2: Validate-only (check each endpoint against Azure)
+  python main.py --cleanup-private-endpoints \\
+    --import-resource-monitor DisconnectedPEs.xlsx \\
+    --validate-only
+
+  # Step 3: Dry-run (simulate deletions)
+  python main.py --cleanup-private-endpoints \\
+    --import-resource-monitor DisconnectedPEs.xlsx \\
+    --dry-run --delete-approved --change-ticket CHG0001234
+
+  # Step 4: Live delete (SU account required)
+  python main.py --cleanup-private-endpoints \\
+    --import-resource-monitor DisconnectedPEs.xlsx \\
+    --delete-approved --change-ticket CHG0001234 \\
+    --approved-by "Linda Johnson" --required-user bh55-su@cdc.gov
 
   # Governance scan - az rest fallback (no resource-graph extension needed)
   python main.py --scan-governance --query-mode rest \
@@ -2512,6 +2558,26 @@ example usage:
     p.add_argument('--manual-nics-csv', dest='manual_nics_csv', default=None,
                  help='CSV for unattached NICs (Azure Portal export). '
                       'NIC classification (KEEP/REVIEW) still applied automatically.')
+
+    # ── Resource Monitor Integration ────────────────────────────────────────
+    p.add_argument('--cleanup-private-endpoints', action='store_true',
+                 help='Run the end-to-end PE cleanup pipeline: '
+                      'Import Resource Monitor export -> Validate vs Azure -> '
+                      'Classify -> Preview/Delete -> Verify -> Report. '
+                      'Requires --import-resource-monitor.')
+    p.add_argument('--import-resource-monitor', dest='import_resource_monitor',
+                 default=None,
+                 help='Path to EDAV Resource Monitor Excel export '
+                      '(e.g. DisconnectedPEs.xlsx). '
+                      'Extracts all disconnected_private_endpoints findings '
+                      'as the authoritative source for cleanup.')
+    p.add_argument('--preview-cleanup', action='store_true',
+                 help='Preview mode: show exactly which endpoints will be deleted, '
+                      'why each qualifies, owner team, cost impact, and any blockers. '
+                      'NO deletions occur. Produces HTML and Markdown preview reports.')
+    p.add_argument('--skip-validation', action='store_true',
+                 help='Skip Azure live validation (faster, uses RM data only). '
+                      'Not recommended for production cleanup.')
     p.add_argument('--config-dir', dest='config_dir', default='config',
                    help='Config directory (default: config/)')
     p.add_argument('--change-ticket', default='',
@@ -3114,6 +3180,100 @@ def run_governance_scan(args) -> None:
     cprint("  3. Run: python main.py --mode delete --dry-run --delete-approved --input approved.xlsx", Fore.WHITE)
     cprint("  4. Run Resource Graph validation query from docs/RESOURCE_GRAPH_QUERIES.md", Fore.WHITE)
     cprint("=" * 72, Fore.CYAN)
+
+
+def run_cleanup_private_endpoints(args) -> None:
+    """
+    End-to-end Resource Monitor -> Azure -> Validate -> Classify -> Delete -> Report pipeline.
+
+    Modes:
+      --preview-cleanup          : Show what will be deleted WITHOUT deleting
+      --validate-only            : Validate and classify, generate reports, no delete
+      --dry-run + --delete-approved : Simulate deletions
+      --delete-approved           : Live delete (requires SU account + approvals)
+    """
+    if not PE_PIPELINE_AVAILABLE:
+        cprint("[ERROR] PE pipeline not available.", Fore.RED, bold=True)
+        cprint("  Ensure engines/pe_pipeline.py and engines/resource_monitor_reader.py are present.", Fore.YELLOW)
+        return
+
+    run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rm_file = getattr(args, "import_resource_monitor", None)
+    if not rm_file:
+        cprint("[ERROR] --import-resource-monitor <file> is required.", Fore.RED, bold=True)
+        cprint("  Example:", Fore.YELLOW)
+        cprint("    python main.py --cleanup-private-endpoints \\", Fore.YELLOW)
+        cprint("      --import-resource-monitor DisconnectedPEs.xlsx", Fore.YELLOW)
+        return
+
+    output_dir = getattr(args, "output_dir", "reports") or "reports"
+    dry_run = getattr(args, "dry_run", False)
+    delete_approved = getattr(args, "delete_approved", False)
+    validate_only = getattr(args, "validate_only", False)
+    preview_only = getattr(args, "preview_cleanup", False)
+    skip_validation = getattr(args, "skip_validation", False)
+    required_user = getattr(args, "required_user", None) or DEFAULT_REQUIRED_DELETE_USER
+    change_ticket = getattr(args, "change_ticket", "") or ""
+    approved_by_arg = getattr(args, "approved_by", "") or ""
+    delete_pause = getattr(args, "delete_pause", 2)
+
+    sep = "=" * 72
+    cprint("\n" + sep, Fore.CYAN, bold=True)
+    cprint("  EDAV Private Endpoint Cleanup Pipeline v" + VERSION, Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+    cprint("  Source File : " + rm_file, Fore.WHITE)
+    cprint("  Output Dir  : " + output_dir, Fore.WHITE)
+    cprint("  Mode        : " + ("PREVIEW" if preview_only else "VALIDATE-ONLY" if validate_only else "DRY-RUN" if dry_run else "LIVE DELETE" if delete_approved else "VALIDATE-ONLY"), Fore.WHITE)
+    cprint("  Date        : " + run_date, Fore.WHITE)
+    if dry_run:
+        cprint("  [DRY RUN] No Azure resources will be modified.", Fore.YELLOW, bold=True)
+
+    # SU account check for live delete
+    cur_user = get_current_az_user()
+    if delete_approved and not dry_run:
+        if cur_user.lower() != required_user.lower():
+            cprint("\n[BLOCKED] SU account required for deletion.", Fore.RED, bold=True)
+            cprint("  Current  : " + cur_user, Fore.RED)
+            cprint("  Required : " + required_user, Fore.RED)
+            cprint("  Run: az logout && az login --use-device-code", Fore.YELLOW)
+            return
+        cprint("  SU Account : " + cur_user + " [VERIFIED]", Fore.GREEN)
+
+    run_meta = {
+        "run_date": run_date,
+        "mode": ("preview" if preview_only else "validate-only" if validate_only else
+                 "dry-run" if dry_run else "delete" if delete_approved else "validate-only"),
+        "az_user": cur_user,
+        "required_user": required_user,
+        "change_ticket": change_ticket or "N/A",
+        "approved_by": approved_by_arg or "N/A",
+        "version": VERSION,
+    }
+
+    pipeline = PrivateEndpointPipeline(
+        output_dir=output_dir,
+        backup_dir="backups",
+        dry_run=dry_run,
+        required_user=required_user,
+        delete_pause=delete_pause,
+        validate_timeout=60,
+    )
+
+    endpoints, report_files = pipeline.run(
+        rm_file=rm_file,
+        run_meta=run_meta,
+        do_delete=delete_approved,
+        preview_only=preview_only,
+        validate_only=validate_only,
+        skip_validation=skip_validation,
+    )
+
+    cprint("\n" + sep, Fore.CYAN)
+    cprint("  REPORTS GENERATED", Fore.CYAN, bold=True)
+    cprint(sep, Fore.CYAN)
+    for fmt, fpath in report_files.items():
+        cprint("  " + fmt.upper() + ": " + str(fpath), Fore.GREEN)
+    cprint(sep, Fore.CYAN)
 
 
 def run_phase1_pipeline(args):
