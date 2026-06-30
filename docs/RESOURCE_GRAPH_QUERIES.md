@@ -1,14 +1,31 @@
 # Azure Resource Graph Queries
 
 **EDAV Resource Governance Platform - Complete Query Library**
-**Version:** v6.1.0 | June 2026
+**Version:** v6.2.0 | June 2026
 
 Use these queries in the **Azure Resource Graph Explorer** in the Azure Portal,
 or via Azure CLI with: `az graph query -q "..." --subscriptions "SUB1,SUB2"`
 
 ---
 
-## How to Run via Azure CLI
+## Query Execution Methods
+
+The governance scanner supports **4 query execution modes** (`--query-mode`).
+This is critical for CDC VDIs where the Azure CLI resource-graph extension
+cannot be installed due to SSL/certificate restrictions.
+
+| Mode | Description | When to Use |
+|------|-------------|-------------|
+| `auto` | Try az graph, fall back to az rest, then CSV | **Default - use this** |
+| `cli` | `az graph query` only | Extension installed and working |
+| `rest` | `az rest` POST to ARM API - **no extension needed** | CDC VDI / SSL blocks extension |
+| `csv` | Manually exported CSV files from Azure Portal | When CLI and REST both fail |
+
+Query results are labeled with their source: `CLI_GRAPH`, `AZ_REST`, or `MANUAL_CSV`.
+
+---
+
+## Method 1: Azure CLI with resource-graph Extension
 
 ```bash
 # Install the graph extension (one-time)
@@ -19,6 +36,99 @@ az graph query -q "PASTE_QUERY_HERE" \
   --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1" \
   --output table
 ```
+
+```bash
+# Via governance scanner:
+python main.py --scan-governance --query-mode cli \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1"
+```
+
+---
+
+## Method 2: az rest Fallback (No Extension Required)
+
+If `az graph query` fails because the extension is missing,
+use `az rest` to POST directly to the Resource Graph REST endpoint.
+**This works on any Azure CLI installation with valid authentication.**
+
+```bash
+# Governance scanner (auto falls back to REST automatically):
+python main.py --scan-governance --query-mode rest \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1"
+```
+
+```bash
+# Direct az rest call (manual example):
+az rest --method post \
+  --url "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01" \
+  --body "{\"query\":\"Resources | where type =~ 'microsoft.network/networkinterfaces' | where isempty(properties.virtualMachine) | project name, resourceGroup, subscriptionId | order by resourceGroup asc\",\"subscriptions\":[\"OCIO-TSBDEV-C1\"]}" \
+  --output json
+```
+
+---
+
+## Method 3: Manual CSV Export from Azure Portal
+
+If both CLI and REST fail (e.g., network policy blocks outbound to management.azure.com),
+export results manually from the Azure Portal Resource Graph Explorer.
+
+**Steps:**
+1. Open **Azure Portal** (`portal.azure.com`) in a browser
+2. Go to: **Resource Graph Explorer** (search bar)
+3. Paste the KQL query from the relevant section below
+4. Click **Run query**
+5. Click the **Download CSV** button in the results pane
+6. Save files and pass to scanner:
+
+```bash
+python main.py --scan-governance --query-mode csv \
+  --manual-private-endpoints-csv pe_results.csv \
+  --manual-nics-csv nic_results.csv \
+  --manual-disks-csv disk_results.csv \
+  --manual-publicips-csv pip_results.csv \
+  --manual-nsg-csv nsg_results.csv
+
+# Or auto-discover from a folder:
+python main.py --scan-governance --query-mode csv \
+  --manual-input-dir "C:\\Users\\bh55\\Desktop\\rg_exports"
+```
+
+**Naming convention for auto-discovery** (`--manual-input-dir`):
+
+| Query | File pattern |
+|-------|--------------|
+| Disconnected Private Endpoints | `pe*.csv` |
+| Unattached NSGs | `nsg*.csv` |
+| Unattached Disks | `disk*.csv` |
+| Unattached Public IPs | `pip*.csv` |
+| Unattached NICs | `nic*.csv` |
+
+---
+
+## Troubleshooting: SSL Certificate Errors (CDC VDI)
+
+`az extension add --name resource-graph` may fail with:
+```
+SSLError: HTTPSConnectionPool(host='aka.ms', port=443)
+Certificate verify failed
+```
+
+**Solutions (in order of preference):**
+
+1. **Use REST mode** (no extension needed):
+   ```bash
+   python main.py --scan-governance --query-mode rest \
+     --subscriptions "OCIO-TSBDEV-C1"
+   ```
+
+2. **Use manual CSV** (no network requirements beyond Portal access):
+   ```bash
+   python main.py --scan-governance --query-mode csv \
+     --manual-private-endpoints-csv pe_results.csv
+   ```
+
+3. **Contact CDC IT** to whitelist `aka.ms` and `azcliprod.blob.core.windows.net`
+   in CDC proxy/firewall rules for Azure CLI extension downloads.
 
 ---
 
@@ -257,12 +367,28 @@ Resources
 
 ## Running the Governance Scanner
 
-The governance scanner runs ALL queries above automatically:
+The governance scanner runs ALL queries above automatically.
 
 ```bash
+# Default (auto mode - tries az graph, falls back to az rest):
 python main.py --scan-governance \
   --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1" \
   --output-dir reports/governance/
+
+# REST mode (CDC VDI - no resource-graph extension needed):
+python main.py --scan-governance --query-mode rest \
+  --subscriptions "OCIO-TSBDEV-C1,OCIO-TSBPRD-C1,OCIO-EDAV-DMZ-DEV-C1,OCIO-EDAV-DMZ-PRD-C1" \
+  --output-dir reports/governance/
+
+# CSV mode (manually exported files from Azure Portal):
+python main.py --scan-governance --query-mode csv \
+  --manual-private-endpoints-csv pe_results.csv \
+  --manual-nics-csv nic_results.csv \
+  --manual-disks-csv disk_results.csv
+
+# Single query in REST mode:
+python main.py --scan-governance --governance-query unattached_nics \
+  --query-mode rest --subscriptions "OCIO-TSBDEV-C1"
 ```
 
 This generates:
@@ -284,5 +410,5 @@ This generates:
 
 ---
 
-*EDAV Azure Resource Governance Platform v6.1.0*
+*EDAV Azure Resource Governance Platform v6.2.0*
 *Built for the EDAV Platform Team at CDC*
